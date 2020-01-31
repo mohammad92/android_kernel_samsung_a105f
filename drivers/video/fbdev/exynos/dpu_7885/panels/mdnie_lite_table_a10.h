@@ -1133,21 +1133,21 @@ static unsigned char MOVIE_VIDEO_1[] = {
 	0x01, //cs_gain 10
 	0x00,
 	0x00, //curve_0
-	0x0a, //curve_1
-	0x17, //curve_2
-	0x26, //curve_3
-	0x36, //curve_4
-	0x49, //curve_5
-	0x5c, //curve_6
-	0x6f, //curve_7
-	0x82, //curve_8
-	0x95, //curve_9
-	0xa8, //curve_10
-	0xbb, //curve_11
-	0xcb, //curve_12
-	0xdb, //curve_13
-	0xeb, //curve_14
-	0xf8, //curve_15
+	0x10, //curve_1
+	0x20, //curve_2
+	0x30, //curve_3
+	0x40, //curve_4
+	0x50, //curve_5
+	0x60, //curve_6
+	0x70, //curve_7
+	0x80, //curve_8
+	0x90, //curve_9
+	0xa0, //curve_10
+	0xb0, //curve_11
+	0xc0, //curve_12
+	0xd0, //curve_13
+	0xe0, //curve_14
+	0xf0, //curve_15
 	0x01, //curve_16
 	0x00,
 	0x00, //curve_offset
@@ -1202,7 +1202,7 @@ static unsigned char MOVIE_VIDEO_2[] = {
 
 static unsigned char AUTO_VIDEO_1[] = {
 	0xCF,
-	0x07, //de cs cc 000
+	0x06, //de cs cc 000
 	0x00, //de_gain 10
 	0x10,
 	0x40, //de_maxplus 8
@@ -1210,21 +1210,21 @@ static unsigned char AUTO_VIDEO_1[] = {
 	0x01, //cs_gain 10
 	0x20,
 	0x00, //curve_0
-	0x0a, //curve_1
-	0x17, //curve_2
-	0x26, //curve_3
-	0x36, //curve_4
-	0x49, //curve_5
-	0x5c, //curve_6
-	0x6f, //curve_7
-	0x82, //curve_8
-	0x95, //curve_9
-	0xa8, //curve_10
-	0xbb, //curve_11
-	0xcb, //curve_12
-	0xdb, //curve_13
-	0xeb, //curve_14
-	0xf8, //curve_15
+	0x10, //curve_1
+	0x20, //curve_2
+	0x30, //curve_3
+	0x40, //curve_4
+	0x50, //curve_5
+	0x60, //curve_6
+	0x70, //curve_7
+	0x80, //curve_8
+	0x90, //curve_9
+	0xa0, //curve_10
+	0xb0, //curve_11
+	0xc0, //curve_12
+	0xd0, //curve_13
+	0xe0, //curve_14
+	0xf0, //curve_15
 	0x01, //curve_16
 	0x00,
 	0x00, //curve_offset

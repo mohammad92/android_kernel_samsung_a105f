@@ -3999,13 +3999,7 @@ void ext4_truncate(struct inode *inode)
 		return;
 	}
 
-	/*
-	 * We add to check encryption status before it truncates page.
-	 * It prevents to report BUG_ON when it doesn't have the
-	 * encryption info even if an inode has the encryption flag.
-	 */
-	if ((inode->i_size & (inode->i_sb->s_blocksize - 1)) &&
-		(!ext4_encrypted_inode(inode) || ext4_get_encryption_info(inode)))
+	if (inode->i_size & (inode->i_sb->s_blocksize - 1))
 		ext4_block_truncate_page(handle, mapping, inode->i_size);
 
 	/*
@@ -4937,9 +4931,6 @@ int ext4_setattr(struct dentry *dentry, struct iattr *attr)
 	error = inode_change_ok(inode, attr);
 	if (error)
 		return error;
-	if (attr->ia_valid & ATTR_SIZE &&
-			ext4_encrypted_inode(inode) && ext4_get_encryption_info(inode))
-		return -EACCES;
 
 	if (is_quota_modification(inode, attr)) {
 		error = dquot_initialize(inode);
@@ -4978,6 +4969,14 @@ int ext4_setattr(struct dentry *dentry, struct iattr *attr)
 		handle_t *handle;
 		loff_t oldsize = inode->i_size;
 		int shrink = (attr->ia_size <= inode->i_size);
+
+		if (ext4_encrypted_inode(inode)) {
+			error = ext4_get_encryption_info(inode);
+			if (error)
+				return error;
+			if (!ext4_has_encryption_key(inode))
+				return -ENOKEY;
+		}
 
 		if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))) {
 			struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);

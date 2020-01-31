@@ -204,7 +204,7 @@ int sensor_5e9_cis_init(struct v4l2_subdev *subdev)
 	if (ret < 0) {
 		warn("sensor_5e9_check_rev is fail when cis init");
 		cis->rev_flag = true;
-		ret = 0;
+		goto p_err;
 	}
 
 	cis->cis_data->cur_width = SENSOR_5E9_MAX_WIDTH;

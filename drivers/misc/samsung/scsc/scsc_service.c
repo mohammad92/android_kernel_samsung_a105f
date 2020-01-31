@@ -458,7 +458,7 @@ void scsc_mx_service_service_failed(struct scsc_service *service, const char *re
 	struct srvman  *srvman = scsc_mx_get_srvman(mx);
 	u16 host_panic_code;
 
-	host_panic_code = (SCSC_PANIC_CODE_HOST << 15) | service->id;
+	host_panic_code = (SCSC_PANIC_CODE_HOST << 15) | (service->id << SCSC_SYSERR_HOST_SERVICE_SHIFT);
 
 	srvman_set_error(srvman);
 	switch (service->id) {
@@ -474,7 +474,7 @@ void scsc_mx_service_service_failed(struct scsc_service *service, const char *re
 
 	}
 
-	SCSC_TAG_INFO(MXMAN, "Reporting host panic code 0x%02x\n", host_panic_code);
+	SCSC_TAG_INFO(MXMAN, "Reporting host hang code 0x%02x\n", host_panic_code);
 
 	mxman_fail(scsc_mx_get_mxman(mx), host_panic_code, reason);
 }
@@ -627,8 +627,7 @@ int scsc_mx_service_mifram_alloc(struct scsc_service *service, size_t nbytes, sc
 	void                *mem;
 	int                 ret;
 
-	mem = miframman_alloc(scsc_mx_get_ramman(mx), nbytes, align);
-
+	mem = miframman_alloc(scsc_mx_get_ramman(mx), nbytes, align, service->id);
 	if (!mem) {
 		SCSC_TAG_ERR(MXMAN, "miframman_alloc() failed\n");
 		*ref = SCSC_MIFRAM_INVALID_REF;

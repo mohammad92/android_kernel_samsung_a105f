@@ -46,7 +46,7 @@
 #define MAX_MCSC_DNR_WIDTH		(4128)
 #define MAX_MCSC_DNR_HEIGHT		(3096)
 #endif
-
+#define USE_I2C_LOCK                              /* I2C LOCK ENABLE DEFINE */
 
 /***** SUPPORT EXTERNEL FUNCTION DEFINE *****/
 #define USE_SSRM_CAMERA_INFO                      /* Match with SAMSUNG_SSRM define of Camera Hal side */

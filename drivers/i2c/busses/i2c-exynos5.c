@@ -596,15 +596,17 @@ static int exynos5_i2c_set_timing(struct exynos5_i2c *i2c, int mode)
 	i2c_timing_s2 = (0xF << 16) | t_data_su << 24 | t_scl_l << 8 | t_scl_h;
 	i2c_timing_s3 = (div << 16) | t_sr_release;
 	i2c_timing_sla = t_data_hd;
-/*
-	dev_dbg(i2c->dev, "tSTART_SU: %X, tSTART_HD: %X, tSTOP_SU: %X\n",
-		t_start_su, t_start_hd, t_stop_su);
-	dev_dbg(i2c->dev, "tDATA_SU: %X, tSCL_L: %X, tSCL_H: %X\n",
-		t_data_su, t_scl_l, t_scl_h);
-	dev_dbg(i2c->dev, "nClkDiv: %X, tSR_RELEASE: %X\n",
-		div, t_sr_release);
-	dev_dbg(i2c->dev, "tDATA_HD: %X\n", t_data_hd);
-*/
+
+	if (!i2c->need_hw_init) {
+		dev_dbg(i2c->dev, "tSTART_SU: %X, tSTART_HD: %X, tSTOP_SU: %X\n",
+			t_start_su, t_start_hd, t_stop_su);
+		dev_dbg(i2c->dev, "tDATA_SU: %X, tSCL_L: %X, tSCL_H: %X\n",
+			t_data_su, t_scl_l, t_scl_h);
+		dev_dbg(i2c->dev, "nClkDiv: %X, tSR_RELEASE: %X\n",
+			div, t_sr_release);
+		dev_dbg(i2c->dev, "tDATA_HD: %X\n", t_data_hd);
+	}
+
 	printk("tSTART_SU: %X, tSTART_HD: %X, tSTOP_SU: %X\n",
 		t_start_su, t_start_hd, t_stop_su);
 	printk("tDATA_SU: %X, tSCL_L: %X, tSCL_H: %X\n",
@@ -1109,6 +1111,14 @@ static int exynos5_i2c_xfer_msg(struct exynos5_i2c *i2c, struct i2c_msg *msgs, i
 						trans_status = readl(i2c->regs + HSI2C_TRANS_STATUS);
 						if ((!(trans_status & HSI2C_MAST_ST_MASK)) ||
 						   ((stop == 0) && (trans_status & HSI2C_MASTER_BUSY))){
+							timeout = 0;
+							break;
+						} else if (i2c->reset_before_trans &&
+								((trans_status & HSI2C_MAST_ST_MASK) == 0xc)) {
+							/*
+							 * When every trasnfer has arbitration lost after ACK,
+							 * avoid timeout log with all transfer.
+							 */
 							timeout = 0;
 							break;
 						}

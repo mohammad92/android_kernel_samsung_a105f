@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- * Copyright (c) 2014 - 2017 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2014 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  ****************************************************************************/
 
@@ -77,7 +77,7 @@ static struct work_struct	wlbtd_work;
 #define SCSC_R4_V2_MINOR_52 52
 #define SCSC_R4_V2_MINOR_53 53
 
-#define MM_HALT_RSP_TIMEOUT_MS 1000
+#define MM_HALT_RSP_TIMEOUT_MS 100
 
 static char panic_record_dump[PANIC_RECORD_DUMP_BUFFER_SZ];
 static BLOCKING_NOTIFIER_HEAD(firmware_chain);
@@ -137,9 +137,12 @@ static bool disable_error_handling;
 module_param(disable_error_handling, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(disable_error_handling, "Disable error handling");
 
-static bool disable_recovery_handling = 1;
-module_param(disable_recovery_handling, bool, S_IRUGO | S_IWUSR);
+int disable_recovery_handling = 1; /* MEMDUMP_FILE_FOR_RECOVERY : for /sys/wifi/memdump */
+module_param(disable_recovery_handling, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(disable_recovery_handling, "Disable recovery handling");
+static bool disable_recovery_from_memdump_file = true;
+static int memdump = -1;
+static bool disable_recovery_until_reboot;
 
 static uint panic_record_delay = 1;
 module_param(panic_record_delay, uint, S_IRUGO | S_IWUSR);
@@ -148,6 +151,120 @@ MODULE_PARM_DESC(panic_record_delay, "Delay in ms before accessing the panic rec
 static bool disable_logger = true;
 module_param(disable_logger, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(disable_logger, "Disable launch of user space logger");
+
+/*
+ * shared between this module and mgt.c as this is the kobject referring to
+ * /sys/wifi directory. Core driver is called 1st we create the directory
+ * here and share the kobject, so in mgt.c wifi driver can create
+ * /sys/wif/mac_addr using sysfs_create_file api using the kobject
+ *
+ * If both modules tried to create the dir we were getting kernel panic
+ * failure due to kobject associated with dir already existed
+ */
+static struct kobject *wifi_kobj_ref;
+static int refcount;
+static ssize_t sysfs_show_memdump(struct kobject *kobj, struct kobj_attribute *attr,
+				  char *buf);
+static ssize_t sysfs_store_memdump(struct kobject *kobj, struct kobj_attribute *attr,
+				   const char *buf, size_t count);
+static struct kobj_attribute memdump_attr =
+		__ATTR(memdump, 0660, sysfs_show_memdump, sysfs_store_memdump);
+
+/* Retrieve memdump in sysfs global */
+static ssize_t sysfs_show_memdump(struct kobject *kobj,
+				  struct kobj_attribute *attr,
+				  char *buf)
+{
+	return sprintf(buf, "%d\n", memdump);
+}
+
+/* Update memdump in sysfs global */
+static ssize_t sysfs_store_memdump(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf,
+				   size_t count)
+{
+	int r;
+
+	r = kstrtoint(buf, 10, &memdump);
+	if (r < 0)
+		memdump = -1;
+
+	switch (memdump) {
+	case 0:
+	case 2:
+		disable_recovery_from_memdump_file = false;
+		break;
+	case 3:
+	default:
+		disable_recovery_from_memdump_file = true;
+		break;
+	}
+
+	SCSC_TAG_INFO(MXMAN, "memdump: %d\n", memdump);
+
+	return (r == 0) ? count : 0;
+}
+
+struct kobject *mxman_wifi_kobject_ref_get(void)
+{
+	if (refcount++ == 0) {
+		/* Create sysfs directory /sys/wifi */
+		wifi_kobj_ref = kobject_create_and_add("wifi", NULL);
+		kobject_get(wifi_kobj_ref);
+		kobject_uevent(wifi_kobj_ref, KOBJ_ADD);
+		SCSC_TAG_INFO(MXMAN, "wifi_kobj_ref: 0x%p\n", wifi_kobj_ref);
+		WARN_ON(refcount == 0);
+	}
+	return wifi_kobj_ref;
+}
+EXPORT_SYMBOL(mxman_wifi_kobject_ref_get);
+
+void mxman_wifi_kobject_ref_put(void)
+{
+	if (--refcount == 0) {
+		kobject_put(wifi_kobj_ref);
+		kobject_uevent(wifi_kobj_ref, KOBJ_REMOVE);
+		wifi_kobj_ref = NULL;
+		WARN_ON(refcount < 0);
+	}
+}
+EXPORT_SYMBOL(mxman_wifi_kobject_ref_put);
+
+/* Register memdump override */
+void mxman_create_sysfs_memdump(void)
+{
+	int r;
+	struct kobject *kobj_ref = mxman_wifi_kobject_ref_get();
+
+	SCSC_TAG_INFO(MXMAN, "kobj_ref: 0x%p\n", kobj_ref);
+
+	if (kobj_ref) {
+		/* Create sysfs file /sys/wifi/memdump */
+		r = sysfs_create_file(kobj_ref, &memdump_attr.attr);
+		if (r) {
+			/* Failed, so clean up dir */
+			SCSC_TAG_ERR(MXMAN, "Can't create /sys/wifi/memdump\n");
+			mxman_wifi_kobject_ref_put();
+			return;
+		}
+	} else {
+		SCSC_TAG_ERR(MXMAN, "failed to create /sys/wifi directory");
+	}
+}
+
+/* Unregister memdump override */
+void mxman_destroy_sysfs_memdump(void)
+{
+	if (!wifi_kobj_ref)
+		return;
+
+	/* Destroy /sys/wifi/memdump file */
+	sysfs_remove_file(wifi_kobj_ref, &memdump_attr.attr);
+
+	/* Destroy /sys/wifi virtual dir */
+	mxman_wifi_kobject_ref_put();
+}
 
 static int firmware_runtime_flags;
 /**
@@ -286,7 +403,21 @@ static int wait_for_mm_msg_start_ind(struct mxman *mxman)
 
 static int wait_for_mm_msg_halt_rsp(struct mxman *mxman)
 {
-	return wait_for_mm_msg(mxman, &mxman->mm_msg_halt_rsp_completion, MM_HALT_RSP_TIMEOUT_MS);
+	int r;
+	(void)mxman; /* unused */
+
+	if (MM_HALT_RSP_TIMEOUT_MS == 0) {
+		/* Zero implies infinite wait */
+		r = wait_for_completion_interruptible(&mxman->mm_msg_halt_rsp_completion);
+		/* r = -ERESTARTSYS if interrupted, 0 if completed */
+		return r;
+	}
+
+	r = wait_for_completion_timeout(&mxman->mm_msg_halt_rsp_completion, msecs_to_jiffies(MM_HALT_RSP_TIMEOUT_MS));
+	if (r)
+		SCSC_TAG_INFO(MXMAN, "Received MM_HALT_RSP from firmware");
+
+	return r;
 }
 
 #ifndef CONFIG_SCSC_WLBTD
@@ -331,40 +462,14 @@ static int send_mm_msg_stop_blocking(struct mxman *mxman)
 
 	r = wait_for_mm_msg_halt_rsp(mxman);
 	if (r) {
-		SCSC_TAG_ERR(MXMAN, "wait_for_MM_HALT_RSP() failed: r=%d\n", r);
-		return r;
+		/*
+		 * MM_MSG_HALT_RSP is not implemented in all versions of firmware, so don't treat it's non-arrival
+		 * as an error
+		 */
+		SCSC_TAG_INFO(MXMAN, "wait_for_MM_HALT_RSP completed");
 	}
-
 
 	return 0;
-}
-
-static void write_m_test_chip_version_file(struct mxman *mxman)
-{
-	struct file *fp = NULL;
-#if defined(ANDROID_VERSION) && (ANDROID_VERSION >= 90000)
-	char *filepath = "/data/vendor/conn/.cid.info";
-#else
-	char *filepath = "/data/misc/conn/.cid.info";
-#endif
-	char buf[256];
-
-	fp = filp_open(filepath, O_WRONLY|O_CREAT, 0644);
-
-	if (IS_ERR(fp)) {
-		SCSC_TAG_INFO(MXMAN, "cid file wasn't opened\n");
-		return;
-	} else if (fp == NULL) {
-		SCSC_TAG_INFO(MXMAN, "%s doesn't open.\n", filepath);
-		return;
-	}
-
-	snprintf(buf, sizeof(buf), SCSC_RELEASE_SOLUTION"\n");
-	kernel_write(fp, buf, strlen(buf), 0);
-
-	filp_close(fp, NULL);
-
-	SCSC_TAG_DEBUG(MXMAN, "Wrote chip information to .cid.info\n");
 }
 
 static char *chip_version(u32 rf_hw_ver)
@@ -382,7 +487,11 @@ static char *chip_version(u32 rf_hw_ver)
 	case 0x00b2:
 		return "S620";
 	case 0x0000:
+#ifndef CONFIG_SOC_EXYNOS9610
 		return "Error: check if RF chip is present";
+#else
+		return "Unknown";
+#endif
 	}
 	return "Unknown";
 }
@@ -420,8 +529,6 @@ static void mxman_print_versions(struct mxman *mxman)
 	scsc_wlbtd_get_and_print_build_type();
 #endif
 
-	/* write .cid.info */
-	write_m_test_chip_version_file(mxman);
 }
 
 /** Receive handler for messages from the FW along the maxwell management transport */
@@ -573,14 +680,14 @@ static int transports_init(struct mxman *mxman)
 	/* Initialise mx management stack */
 	r = mxmgmt_transport_init(scsc_mx_get_mxmgmt_transport(mx), mx);
 	if (r) {
-		SCSC_TAG_ERR(MXMAN, "mxmgmt_transport_init() failed\n");
+		SCSC_TAG_ERR(MXMAN, "mxmgmt_transport_init() failed %d\n", r);
 		return r;
 	}
 
 	/* Initialise gdb transport for cortex-R4 */
 	r = gdb_transport_init(scsc_mx_get_gdb_transport_r4(mx), mx, GDB_TRANSPORT_R4);
 	if (r) {
-		SCSC_TAG_ERR(MXMAN, "gdb_transport_init() failed\n");
+		SCSC_TAG_ERR(MXMAN, "gdb_transport_init() failed %d\n", r);
 		mxmgmt_transport_release(scsc_mx_get_mxmgmt_transport(mx));
 		return r;
 	}
@@ -588,7 +695,7 @@ static int transports_init(struct mxman *mxman)
 	/* Initialise gdb transport for cortex-M4 */
 	r = gdb_transport_init(scsc_mx_get_gdb_transport_m4(mx), mx, GDB_TRANSPORT_M4);
 	if (r) {
-		SCSC_TAG_ERR(MXMAN, "gdb_transport_init() failed\n");
+		SCSC_TAG_ERR(MXMAN, "gdb_transport_init() failed %d\n", r);
 		gdb_transport_release(scsc_mx_get_gdb_transport_r4(mx));
 		mxmgmt_transport_release(scsc_mx_get_mxmgmt_transport(mx));
 		return r;
@@ -596,7 +703,7 @@ static int transports_init(struct mxman *mxman)
 	/* Initialise mxlog transport */
 	r = mxlog_transport_init(scsc_mx_get_mxlog_transport(mx), mx);
 	if (r) {
-		SCSC_TAG_ERR(MXMAN, "mxlog_transport_init() failed\n");
+		SCSC_TAG_ERR(MXMAN, "mxlog_transport_init() failed %d\n", r);
 		gdb_transport_release(scsc_mx_get_gdb_transport_m4(mx));
 		gdb_transport_release(scsc_mx_get_gdb_transport_r4(mx));
 		mxmgmt_transport_release(scsc_mx_get_mxmgmt_transport(mx));
@@ -607,7 +714,7 @@ static int transports_init(struct mxman *mxman)
 	 * Allocate & Initialise Infrastructre Config Structure
 	 * including the mx management stack config information.
 	 */
-	mxconf = miframman_alloc(scsc_mx_get_ramman(mx), sizeof(struct mxconf), 4);
+	mxconf = miframman_alloc(scsc_mx_get_ramman(mx), sizeof(struct mxconf), 4, MIFRAMMAN_OWNER_COMMON);
 	if (!mxconf) {
 		SCSC_TAG_ERR(MXMAN, "miframman_alloc() failed\n");
 		gdb_transport_release(scsc_mx_get_gdb_transport_m4(mx));
@@ -861,7 +968,7 @@ static int mxman_start(struct mxman *mxman)
 	start_mifram_heap = (char *)start_dram + fwhdr->fw_runtime_length;
 	length_mifram_heap = size_dram - fwhdr->fw_runtime_length;
 
-	miframman_init(scsc_mx_get_ramman(mxman->mx), start_mifram_heap, length_mifram_heap);
+	miframman_init(scsc_mx_get_ramman(mxman->mx), start_mifram_heap, length_mifram_heap, start_dram);
 	mifmboxman_init(scsc_mx_get_mboxman(mxman->mx));
 	mifintrbit_init(scsc_mx_get_intrbit(mxman->mx), mif);
 
@@ -952,10 +1059,17 @@ static int mxman_start(struct mxman *mxman)
 
 static bool is_bug_on_enabled(struct scsc_mx *mx)
 {
-#define MX140_MEMDUMP_INFO_FILE          "/data/.memdump.info"
+	bool bug_on_enabled = false;
+#ifdef CONFIG_SCSC_LOG_COLLECTION
+	return bug_on_enabled;
+#else
+#if defined(ANDROID_VERSION) && (ANDROID_VERSION >= 90000)
+	#define MX140_MEMDUMP_INFO_FILE	"/data/vendor/conn/.memdump.info"
+#else
+	#define MX140_MEMDUMP_INFO_FILE	"/data/misc/conn/.memdump.info"
+#endif
 	const struct firmware *firm;
 	int r;
-	bool bug_on_enabled = false;
 
 	SCSC_TAG_INFO(MX_FILE, "Loading %s file\n", MX140_MEMDUMP_INFO_FILE);
 	r = mx140_request_file(mx, MX140_MEMDUMP_INFO_FILE, &firm);
@@ -968,7 +1082,9 @@ static bool is_bug_on_enabled(struct scsc_mx *mx)
 	else if (*firm->data == '3')
 		bug_on_enabled = true;
 	mx140_release_file(mx, firm);
+	SCSC_TAG_INFO(MX_FILE, "bug_on_enabled %d\n", bug_on_enabled);
 	return bug_on_enabled;
+#endif //CONFIG_SCSC_LOG_COLLECTION
 }
 
 static void print_panic_code_legacy(u16 code)
@@ -1084,7 +1200,7 @@ void mxman_show_last_panic(struct mxman *mxman)
 	SCSC_TAG_INFO(MXMAN, "Reason: '%s'\n", mxman->failure_reason[0] ? mxman->failure_reason : "<null>");
 	SCSC_TAG_INFO(MXMAN, "Auto-recovery: %s\n", disable_recovery_handling ? "off" : "on");
 
-	if (disable_recovery_handling) {
+	if (mxman_recovery_disabled()) {
 		/* Labour the point that a reboot is needed when autorecovery is disabled */
 		SCSC_TAG_INFO(MXMAN, "\n\n*** HANDSET REBOOT NEEDED TO RESTART WLAN AND BT ***\n\n");
 	}
@@ -1245,10 +1361,11 @@ static void mxman_failure_work(struct work_struct *work)
 		process_panic_record(mxman);
 		SCSC_TAG_INFO(MXMAN, "Trying to schedule coredump\n");
 
-		SCSC_TAG_INFO(MXMAN, "scsc_release %d.%d.%d\n",
+		SCSC_TAG_INFO(MXMAN, "scsc_release %d.%d.%d.%d\n",
 			SCSC_RELEASE_PRODUCT,
 			SCSC_RELEASE_ITERATION,
-			SCSC_RELEASE_CANDIDATE);
+			SCSC_RELEASE_CANDIDATE,
+			SCSC_RELEASE_POINT);
 		SCSC_TAG_INFO(MXMAN, "Auto-recovery: %s\n", mxman_recovery_disabled() ? "off" : "on");
 #ifdef CONFIG_SCSC_WLBTD
 		scsc_wlbtd_get_and_print_build_type();
@@ -1317,6 +1434,12 @@ static void mxman_failure_work(struct work_struct *work)
 							 panic_record_dump + used,
 							 PANIC_RECORD_DUMP_BUFFER_SZ - used);
 
+				/* Print the host code/reason again so it's near the FW panic
+				 * record in the kernel log
+				 */
+				print_panic_code(mxman->scsc_panic_code);
+				SCSC_TAG_INFO(MXMAN, "Reason: '%s'\n", mxman->failure_reason[0] ? mxman->failure_reason : "<null>");
+
 				blocking_notifier_call_chain(&firmware_chain,
 							     SCSC_FW_EVENT_MOREDUMP_COMPLETE,
 							     &panic_record_dump);
@@ -1328,15 +1451,16 @@ static void mxman_failure_work(struct work_struct *work)
 		}
 
 		if (is_bug_on_enabled(mx)) {
-			SCSC_TAG_INFO(MX_FILE, "Deliberately panic the kernel due to WLBT firmware failure!\n");
-			SCSC_TAG_INFO(MX_FILE, "calling BUG_ON(1)\n");
+			SCSC_TAG_ERR(MX_FILE, "Deliberately panic the kernel due to WLBT firmware failure!\n");
+			SCSC_TAG_ERR(MX_FILE, "calling BUG_ON(1)\n");
 			BUG_ON(1);
 		}
 		/* Clean up the MIF following error handling */
 		if (mif->mif_cleanup && mxman_recovery_disabled())
 			mif->mif_cleanup(mif);
 	}
-	SCSC_TAG_INFO(MXMAN, "Auto-recovery: %s\n", mxman_recovery_disabled() ? "off" : "on");
+	SCSC_TAG_INFO(MXMAN, "Auto-recovery: %s\n",
+		mxman_recovery_disabled() ? "off" : "on");
 
 	if (!mxman_recovery_disabled())
 		srvman_clear_error(srvman);
@@ -1673,6 +1797,12 @@ void mxman_fail(struct mxman *mxman, u16 scsc_panic_code, const char *reason)
 		mxman->mxman_next_state = MXMAN_STATE_FAILED;
 		mxman->scsc_panic_code = scsc_panic_code;
 		strlcpy(mxman->failure_reason, reason, sizeof(mxman->failure_reason));
+		/* If recovery is disabled, don't let it be
+		 * re-enabled from now on. Device must reboot
+		 */
+		if (mxman_recovery_disabled())
+			disable_recovery_until_reboot  = true;
+
 		failure_wq_start(mxman);
 	} else {
 		SCSC_TAG_WARNING(MXMAN, "Not in MXMAN_STATE_STARTED state, ignore (state %d)\n", mxman->mxman_state);
@@ -1711,10 +1841,17 @@ void mxman_init(struct mxman *mxman, struct scsc_mx *mx)
 	       sizeof(saved_fw_build_id));
 	mxproc_create_info_proc_dir(&mxman->mxproc, mxman);
 	active_mxman = mxman;
+
+#if defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000
+	mxman_create_sysfs_memdump();
+#endif
 }
 
 void mxman_deinit(struct mxman *mxman)
 {
+#if defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000
+	mxman_destroy_sysfs_memdump();
+#endif
 	active_mxman = NULL;
 	mxproc_remove_info_proc_dir(&mxman->mxproc);
 	fw_crc_wq_deinit(mxman);
@@ -1761,7 +1898,7 @@ int mxman_suspend(struct mxman *mxman)
 	if (srvman && srvman->error) {
 		mutex_unlock(&mxman->mxman_mutex);
 		SCSC_TAG_INFO(MXMAN, "Called during error - ignore\n");
-		return -EINVAL;
+		return 0;
 	}
 
 	/* Call Service suspend callbacks */
@@ -1964,7 +2101,16 @@ EXPORT_SYMBOL(mx140_log_dump);
 
 bool mxman_recovery_disabled(void)
 {
-	return disable_recovery_handling;
+	/* If FW has panicked when recovery was disabled, don't allow it to
+	 * be enabled. The horse has bolted.
+	 */
+	if (disable_recovery_until_reboot)
+		return true;
+
+	if (disable_recovery_handling == MEMDUMP_FILE_FOR_RECOVERY)
+		return disable_recovery_from_memdump_file;
+	else
+		return disable_recovery_handling ? true : false;
 }
 EXPORT_SYMBOL(mxman_recovery_disabled);
 
@@ -1997,8 +2143,8 @@ void mxman_get_driver_version(char *version, size_t ver_sz)
 {
 	/* IMPORTANT - Do not change the formatting as User space tooling is parsing the string
 	* to read SAP fapi versions. */
-	snprintf(version, ver_sz - 1, "drv_ver: %d.%d.%d",
-		 SCSC_RELEASE_PRODUCT, SCSC_RELEASE_ITERATION, SCSC_RELEASE_CANDIDATE);
+	snprintf(version, ver_sz - 1, "drv_ver: %d.%d.%d.%d",
+		 SCSC_RELEASE_PRODUCT, SCSC_RELEASE_ITERATION, SCSC_RELEASE_CANDIDATE, SCSC_RELEASE_POINT);
 #ifdef CONFIG_SCSC_WLBTD
 	scsc_wlbtd_get_and_print_build_type();
 #endif

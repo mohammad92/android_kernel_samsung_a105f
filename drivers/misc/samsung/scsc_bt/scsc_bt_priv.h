@@ -76,6 +76,7 @@ enum scsc_bt_read_op {
 	BT_READ_OP_HCI_EVT_ERROR,
 	BT_READ_OP_ACL_DATA,
 	BT_READ_OP_ACL_CREDIT,
+	BT_READ_OP_IQ_REPORT,
 	BT_READ_OP_STOP
 };
 
@@ -236,6 +237,8 @@ struct scsc_bt_service {
 	u32                            mailbox_acl_free_read;
 	u32                            mailbox_acl_free_read_scan;
 	u32                            mailbox_acl_free_write;
+	u32                            mailbox_iq_report_read;
+	u32                            mailbox_iq_report_write;
 
 	struct scsc_bt_avdtp_detect    avdtp_detect;
 	struct completion              recovery_release_complete;
@@ -243,6 +246,40 @@ struct scsc_bt_service {
 };
 
 extern struct scsc_bt_service bt_service;
+
+/* IQ reporting */
+#define HCI_IQ_REPORTING_MAX_NUM_SAMPLES               (82)
+/**
+ * The driver supports both reception of LE Connection IQ Report
+ * and LE Connectionless IQ report event:
+ *
+ * The largest hci event is LE Connection IQ Report, which
+ * constitutes of:
+ *
+ * - Hci packet type    : 1 octet
+ * - Event code         : 1 octet
+ * - Param total Length : 1 octet
+ * - Subevent code      : 1 octet
+ * - Connection hdl     : 2 octets
+ * - RX_PHY             : 1 octet
+ * - Data_channel_idx   : 1 octet
+ * - RSSI               : 2 octets
+ * - RSSI antenna id    : 1 octet
+ * - cte type           : 1 octet
+ * - Slot durations     : 1 octet
+ * - packet_status      : 1 octet
+ * - Sample count       : 1 octet
+ *********************************
+ * Total                : 15 octets
+ *
+ * The maximum hci event size in bytes is:
+ *     (15 + (number of samples * 2 (both I and Q)))
+ *
+ */
+#define HCI_IQ_REPORT_MAX_LEN                          (15 + (2 * HCI_IQ_REPORTING_MAX_NUM_SAMPLES))
+#define HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT_SUB_CODE (0x15)
+#define HCI_LE_CONNECTION_IQ_REPORT_EVENT_SUB_CODE     (0x16)
+
 
 struct scsc_ant_service {
 	dev_t                          device;

@@ -659,6 +659,11 @@ static void s2mu004_muic_afc_control_ping_retry(struct work_struct *work)
 		container_of(work, struct s2mu004_muic_data, afc_control_ping_retry.work);
 	pr_info("%s retry_cnt : %d\n", __func__, muic_data->retry_cnt);
 
+	if (!s2mu004_muic_get_vbus_state(muic_data)) {
+		cancel_delayed_work(&muic_data->afc_control_ping_retry);
+		return;
+	}
+
 	if (muic_data->retry_cnt <  RETRY_PING_CNT) {
 		muic_data->retry_cnt++;
 		s2mu004_hv_muic_write_reg(muic_data->i2c, 0x4A, 0x06);
@@ -709,6 +714,8 @@ static int s2mu004_hv_muic_handle_attach
 		}
 		pr_info("%s is_charger_ready[%c], just return\n",
 			__func__, (muic_data->is_charger_ready ? 'T' : 'F'));
+		return ret;
+	} else if (!s2mu004_muic_get_vbus_state(muic_data)) {
 		return ret;
 	}
 
@@ -1372,6 +1379,8 @@ void s2mu004_muic_prepare_afc_charger(struct work_struct *work)
 
 	for (i = 0; i < 10; i++) {
 		msleep(130);
+		if(!s2mu004_muic_get_vbus_state(muic_data))
+			return;
 		s2mu004_read_reg(muic_data->i2c, S2MU004_REG_AFC_STATUS, &vdnmon);
 		pr_info("%s vdnmon(%#x)\n", __func__, vdnmon);
 		if ((vdnmon & STATUS_VDNMON_MASK) == VDNMON_LOW) {
@@ -1385,6 +1394,8 @@ void s2mu004_muic_prepare_afc_charger(struct work_struct *work)
 	s2mu004_muic_bcd_rescan(muic_data);
 	for (i = 0; i < 5; i++) {
 		msleep(100);
+		if(!s2mu004_muic_get_vbus_state(muic_data))
+			return;
 		s2mu004_read_reg(muic_data->i2c, S2MU004_REG_AFC_STATUS, &vdnmon);
 		pr_info("%s vdnmon(%#x)\n", __func__, vdnmon);
 		if ((vdnmon & STATUS_VDNMON_MASK) == VDNMON_LOW) {

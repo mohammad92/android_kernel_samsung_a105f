@@ -17,6 +17,19 @@
 
 #include "wakelock.h"
 
+static inline u32  slsi_convert_tlv_data_to_value(u8 *data, u16 length)
+{
+	u32 value = 0;
+	int i;
+
+	if (length > 4)
+		return 0;
+	for (i = 0; i < length; i++)
+		value |= ((u32)data[i]) << i * 8;
+
+	return value;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif

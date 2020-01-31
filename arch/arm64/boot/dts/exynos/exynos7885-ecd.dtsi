@@ -13,25 +13,17 @@
  * published by the Free Software Foundation.
  */
 / {
-	fragment@ecd {
-		target-path = "/";
-		__overlay__ {
-		#address-cells = <2>;
-		#size-cells = <1>;
-
-			/* UART_DBG */
-			exynos_console_debugger {
-				compatible = "samsung,exynos_console_debugger";
-				reg = <0x0 0x13820000 0x100>;
-				interrupts = <0 279 0>;
-				interrupt-names = "uart_irq";
-				pinctrl-names = "default";
-				pinctrl-0 = <&uart2_bus>;
-				uart_port = <2>;
-				/* <sfr_base_address sfr_size> */
-				sfr_reg = <0x10000000 0x10000000>;
-				status = "ok";
-			};
-		};
+	/* UART_DBG */
+	exynos_console_debugger {
+		compatible = "samsung,exynos_console_debugger";
+		reg = <0x0 0x13820000 0x100>;
+		interrupts = <0 279 0>;
+		interrupt-names = "uart_irq";
+		pinctrl-names = "default";
+		pinctrl-0 = <&uart2_bus>;
+		uart_port = <2>;
+		/* <sfr_base_address sfr_size> */
+		sfr_reg = <0x10000000 0x10000000>;
+		status = "ok";
 	};
 };

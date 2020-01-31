@@ -186,13 +186,13 @@ config SCSC_WLAN_AP_INFO_FILE
 
 config SCSC_WLAN_WIFI_SHARING
 	bool "Wifi Sharing Support"
-	default n
+	default y
 	---help---
 	  This option tells if wifi sharing is supported or not.
 
 config SCSC_WLAN_ENABLE_MAC_RANDOMISATION
         bool "Wifi Mac Randomization Support"
-        default n
+        default y
         ---help---
           This option tells if mac randomization is supported or not.
 
@@ -204,8 +204,35 @@ config SCSC_WLAN_SINGLE_ANTENNA
 	  This option tells if there is support for single
 	  antenna or dual antenna.
 
+config SCSC_WLAN_ACS_ENABLE
+        bool "ACS Support"
+        default y
+        ---help---
+          This option tells if automatic channel selection is
+	  supported or not.
+
 config SCSC_AP_INTERFACE_NAME
         string "AP net device interface name"
         default "swlan0"
         ---help---
           AP net device interface name.
+
+config SCSC_WLAN_MHS_STATIC_INTERFACE
+        bool "Static AP Interface Support"
+        default n
+        ---help---
+          This option tells if AP interface has been created
+          statically or dynamically.
+
+config SCSC_WIFI_NAN_ENABLE
+        bool "Enable WiFi NAN"
+        default n
+        ---help---
+          This option tells whether WiFi NAN is enabled or not.
+
+config SLSI_WLAN_STA_FWD_BEACON
+        bool "Forwarding beacon support"
+        default y
+        ---help---
+          This option tells if beacon forwarding in STA mode is enabled or not.
+          When it is enabled, Driver deliver beacon info of connected AP to Supplicant.

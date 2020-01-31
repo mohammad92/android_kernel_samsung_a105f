@@ -2832,6 +2832,7 @@ static bool sec_bat_fullcharged_check(
 	return true;
 }
 
+#if defined(CONFIG_ABNORMAL_BAT_THM_WA)
 static void sec_bat_control_temperature(struct sec_battery_info *battery)
 {
 	int temp_now = 0, prev_temp = 0;
@@ -2857,6 +2858,7 @@ static void sec_bat_control_temperature(struct sec_battery_info *battery)
 	pr_info("%s : prev_temp(%d), temp_now(%d), temp_control(%d)\n",
 		__func__, prev_temp, battery->temperature, battery->temp_control);
 }
+#endif
 
 static void sec_bat_get_temperature_info(
 				struct sec_battery_info *battery)
@@ -2897,8 +2899,10 @@ static void sec_bat_get_temperature_info(
 			SEC_BAT_ADC_CHANNEL_TEMP_AMBIENT, &value);
 		battery->temper_amb = value.intval;
 
+#if defined(CONFIG_ABNORMAL_BAT_THM_WA)
 		sec_bat_control_temperature(battery);
 		battery->prev_bat_temp = battery->temperature;
+#endif
 
 		if (battery->pdata->usb_thermal_source) {
 			sec_bat_get_value_by_adc(battery,
@@ -6737,6 +6741,7 @@ ssize_t sec_bat_store_attrs(
 		}
 		break;
 	case FACTORY_MODE_BYPASS:
+		pr_info("%s: factory mode bypass\n", __func__);
 		if (sscanf(buf, "%10d\n", &x) == 1) {
 			value.intval = x;
 			psy_do_property(battery->pdata->charger_name, set,
@@ -6745,7 +6750,13 @@ ssize_t sec_bat_store_attrs(
 		}
 		break;
 	case NORMAL_MODE_BYPASS:
+		pr_info("%s: normal mode bypass for current measure\n", __func__);
 		if (sscanf(buf, "%10d\n", &x) == 1) {
+			if (battery->pdata->detect_moisture && x) {
+				sec_bat_set_charging_status(battery, POWER_SUPPLY_STATUS_DISCHARGING);
+				sec_bat_set_charge(battery, SEC_BAT_CHG_MODE_BUCK_OFF);
+			}
+
 			value.intval = x;
 			psy_do_property(battery->pdata->charger_name, set,
 				POWER_SUPPLY_EXT_PROP_CURRENT_MEASURE, value);
@@ -6946,7 +6957,7 @@ static int sec_bat_set_property(struct power_supply *psy,
 			&battery->monitor_work, 0);
 		break;
 #endif
-#if !defined(CONFIG_SAMSUNG_BATTERY_ENG_TEST) && !defined(CONFIG_SEC_FACTORY)
+#if !defined(CONFIG_ENG_BATTERY_CONCEPT) && !defined(CONFIG_SEC_FACTORY)
 	case POWER_SUPPLY_PROP_SCOPE:
 		battery->block_water_event = val->intval;
 		break;
@@ -7573,6 +7584,19 @@ static int sec_bat_cable_check(struct sec_battery_info *battery,
 		current_cable_type = SEC_BATTERY_CABLE_NONE;
 		break;
 	case ATTACHED_DEV_UNDEFINED_CHARGING_MUIC:
+		if (battery->pdata->enable_water_resistance) {
+			current_cable_type = SEC_BATTERY_CABLE_NONE;
+#if defined(CONFIG_BATTERY_CISD)
+		battery->cisd.data[CISD_DATA_WATER_DETECT]++;
+		battery->cisd.data[CISD_DATA_WATER_DETECT_PER_DAY]++;
+#endif
+#if defined(CONFIG_SEC_ABC)
+		sec_abc_send_event("MODULE=battery@ERROR=water_detect");
+#endif
+		} else {
+			current_cable_type = SEC_BATTERY_CABLE_TA;
+		}
+		break;
 	case ATTACHED_DEV_UNDEFINED_RANGE_MUIC:
 		if (battery->pdata->enable_water_resistance) {
 			current_cable_type = SEC_BATTERY_CABLE_NONE;
@@ -7583,6 +7607,8 @@ static int sec_bat_cable_check(struct sec_battery_info *battery,
 #if defined(CONFIG_SEC_ABC)
 		sec_abc_send_event("MODULE=battery@ERROR=water_detect");
 #endif
+		} else if (battery->pdata->detect_moisture) {
+			current_cable_type = SEC_BATTERY_CABLE_NONE;
 		} else {
 			current_cable_type = SEC_BATTERY_CABLE_TA;
 		}
@@ -7598,20 +7624,34 @@ static int sec_bat_cable_check(struct sec_battery_info *battery,
 	case ATTACHED_DEV_TIMEOUT_OPEN_MUIC:
 		current_cable_type = SEC_BATTERY_CABLE_TIMEOUT;
 		break;
-	case ATTACHED_DEV_USB_MUIC:
 	case ATTACHED_DEV_JIG_USB_OFF_MUIC:
+		if (!battery->pdata->enable_water_resistance && battery->pdata->detect_moisture)
+			current_cable_type = SEC_BATTERY_CABLE_NONE;
+		else
+			current_cable_type = SEC_BATTERY_CABLE_USB;
+		break;
+	case ATTACHED_DEV_USB_MUIC:
 	case ATTACHED_DEV_SMARTDOCK_USB_MUIC:
 	case ATTACHED_DEV_UNOFFICIAL_ID_USB_MUIC:
 		current_cable_type = SEC_BATTERY_CABLE_USB;
 		break;
 	case ATTACHED_DEV_JIG_UART_ON_VB_MUIC:
+		current_cable_type = factory_mode ? SEC_BATTERY_CABLE_NONE : 
+			SEC_BATTERY_CABLE_UARTOFF;
+		break;
 	case ATTACHED_DEV_JIG_UART_OFF_VB_MUIC:
 	case ATTACHED_DEV_JIG_UART_OFF_VB_FG_MUIC:
-		current_cable_type = factory_mode ? SEC_BATTERY_CABLE_NONE :
-			SEC_BATTERY_CABLE_UARTOFF;
-		if (battery->block_water_event) {
-			if (!(factory_mode))
-				current_cable_type = SEC_BATTERY_CABLE_UARTOFF;
+		if (!battery->pdata->enable_water_resistance && battery->pdata->detect_moisture) {
+#if defined(CONFIG_ENG_BATTERY_CONCEPT) || defined(CONFIG_SEC_FACTORY)
+			current_cable_type = SEC_BATTERY_CABLE_UARTOFF;
+#endif
+		} else {
+			current_cable_type = factory_mode ? SEC_BATTERY_CABLE_NONE :
+				SEC_BATTERY_CABLE_UARTOFF;
+			if (battery->block_water_event) {
+				if (!(factory_mode))
+					current_cable_type = SEC_BATTERY_CABLE_UARTOFF;
+			}
 		}
 		break;
 	case ATTACHED_DEV_RDU_TA_MUIC:
@@ -8288,13 +8328,26 @@ static int batt_handle_notification(struct notifier_block *nb,
 		break;
 	}
 
-#if !defined(CONFIG_SAMSUNG_BATTERY_ENG_TEST) && !defined(CONFIG_SEC_FACTORY)
-	if (battery->pdata->enable_water_resistance) {
+#if !defined(CONFIG_ENG_BATTERY_CONCEPT) && !defined(CONFIG_SEC_FACTORY)
+	pr_info("%s : enable_water_resistance(%d), detect_moisture(%d), block_water_event(%d), muic_cable_type(%d)\n", 
+		__func__, battery->pdata->enable_water_resistance, battery->pdata->detect_moisture, 
+		battery->block_water_event, battery->muic_cable_type);
+	
+	if (!battery->pdata->enable_water_resistance && battery->pdata->detect_moisture) {
+		/* Block water event UI popup is required for 255k, 301k & 523k cable */
+		block_water_event =
+			(battery->block_water_event) ||
+			((battery->muic_cable_type != ATTACHED_DEV_JIG_USB_OFF_MUIC) &&
+			(battery->muic_cable_type != ATTACHED_DEV_JIG_USB_ON_MUIC) &&
+			(battery->muic_cable_type != ATTACHED_DEV_JIG_UART_OFF_VB_MUIC) &&
+			(battery->muic_cable_type != ATTACHED_DEV_JIG_UART_OFF_VB_FG_MUIC));
+	} else {
 		block_water_event = (battery->block_water_event) ||
 			((battery->muic_cable_type != ATTACHED_DEV_JIG_UART_ON_MUIC) &&
 			(battery->muic_cable_type != ATTACHED_DEV_JIG_USB_ON_MUIC));
 	}
 #endif
+
 	block_water_event &= (battery->muic_cable_type != ATTACHED_DEV_UNDEFINED_RANGE_MUIC);
 	sec_bat_set_misc_event(battery, BATT_MISC_EVENT_UNDEFINED_RANGE_TYPE, block_water_event);
 	if (battery->muic_cable_type == ATTACHED_DEV_HICCUP_MUIC) {
@@ -8662,6 +8715,9 @@ static int sec_bat_parse_dt(struct device *dev,
 
 	pdata->fake_capacity = of_property_read_bool(np,
 						"battery,fake_capacity");
+
+	pdata->detect_moisture = of_property_read_bool(np, "battery,detect_moisture");
+	pr_info("%s : detect_moisture = %d \n", __func__, pdata->detect_moisture);
 
 	p = of_get_property(np, "battery,polling_time", &len);
 	if (!p)
@@ -10170,7 +10226,10 @@ static int sec_battery_probe(struct platform_device *pdev)
 	battery->wa_float_cnt = 0;
 	battery->hiccup_status = 0;
 
+#if defined(CONFIG_ABNORMAL_BAT_THM_WA)
 	battery->temp_control = false;
+	battery->prev_bat_temp = 0x7FFF;
+#endif
 
 	sec_bat_set_current_event(battery, SEC_BAT_CURRENT_EVENT_USB_100MA, SEC_BAT_CURRENT_EVENT_USB_100MA);
 
@@ -10252,9 +10311,12 @@ static int sec_battery_probe(struct platform_device *pdev)
 	battery->timetofull = -1;
 #endif
 
-#if !defined(CONFIG_SAMSUNG_BATTERY_ENG_TEST) && !defined(CONFIG_SEC_FACTORY)
-	battery->block_water_event = (battery->pdata->enable_water_resistance) ? 0 : 1;
-	pr_info("%s: init block_water_event = %d\n", __func__, battery->block_water_event);
+#if !defined(CONFIG_ENG_BATTERY_CONCEPT) && !defined(CONFIG_SEC_FACTORY)
+    if (battery->pdata->detect_moisture)
+        battery->block_water_event = !(get_switch_sel() & SWITCH_SEL_RUSTPROOF_MASK) ? 0 : 1;
+    else
+        battery->block_water_event = (battery->pdata->enable_water_resistance) ? 0 : 1;
+    pr_info("%s: init block_water_event = %d\n", __func__, battery->block_water_event);
 #endif
 
 	if (battery->pdata->charger_name == NULL)

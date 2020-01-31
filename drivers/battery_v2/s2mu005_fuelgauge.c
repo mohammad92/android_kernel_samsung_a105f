@@ -749,6 +749,13 @@ static void s2mu005_init_regs(struct s2mu005_fuelgauge_data *fuelgauge)
 		temp |= 0x0;
 		s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x45, temp);
 	}
+
+	if (fuelgauge->revision >= 3) {
+		s2mu005_read_reg_byte(fuelgauge->i2c, 0x26, &temp);
+		temp &= 0xFE;
+		s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x26, temp);
+	}
+
 	s2mu005_read_reg_byte(fuelgauge->i2c, 0x53, &temp);
 	fuelgauge->reg_OTP_53 = temp;
 	s2mu005_read_reg_byte(fuelgauge->i2c, 0x52, &temp);
@@ -911,6 +918,16 @@ static int s2mu005_get_rawsoc(struct s2mu005_fuelgauge_data *fuelgauge)
 	}
 
 	mutex_lock(&fuelgauge->fg_lock);
+
+
+	if (fuelgauge->revision >= 3) {
+		s2mu005_read_reg_byte(fuelgauge->i2c, 0x26, &temp);
+		if ((temp & 0x01) == 0x01) {
+			temp &= 0xFE;
+			s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x26, temp);
+		}
+	}
+
 
 	if (fuelgauge->revision >= 2)
 		reg = S2MU005_REG_RSOC;
@@ -2001,9 +2018,33 @@ static int s2mu005_fg_set_property(struct power_supply *psy,
 			}
 			break;
 		case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-			if (val->intval)
+			if (val->intval) {
+
+				if (fuelgauge->revision >= 3) {
+					u8 reg_0x41 = 0, reg_0x27 = 0, reg_0x26 = 0, temp = 0;
+					pr_info("%s, swelling SOC jump issue W/A\n", __func__);
+					mdelay(250);
+
+					s2mu005_read_reg_byte(fuelgauge->i2c, 0x41, &reg_0x41);
+					s2mu005_read_reg_byte(fuelgauge->i2c, 0x27, &reg_0x27);
+					s2mu005_read_reg_byte(fuelgauge->i2c, 0x26, &reg_0x26);
+
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x41, 0xFF);
+					temp = reg_0x27;
+					temp &= 0xF0;
+					temp |= 0x0F;
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x27, temp);
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x26, 0xFD);
+
+					mdelay(260);
+
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x26, reg_0x26);
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x27, reg_0x27);
+					s2mu005_write_and_verify_reg_byte(fuelgauge->i2c, 0x41, reg_0x41);
+				}
+
 				fuelgauge->is_charging = true;
-			else
+			} else
 				fuelgauge->is_charging = false;
 			break;
 		case POWER_SUPPLY_PROP_CAPACITY:

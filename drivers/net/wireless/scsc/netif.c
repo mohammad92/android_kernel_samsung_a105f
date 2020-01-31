@@ -208,8 +208,6 @@ static int slsi_net_open(struct net_device *dev)
 	/* 2511 measn unifiForceActive and 1 means active */
 	if (slsi_is_rf_test_mode_enabled()) {
 		SLSI_NET_ERR(dev, "*#rf# rf test mode set is enabled.\n");
-		slsi_set_mib_roam(sdev, NULL, SLSI_PSID_UNIFI_ROAMING_ENABLED, 0);
-		slsi_set_mib_roam(sdev, NULL, SLSI_PSID_UNIFI_ROAM_MODE, 0);
 		slsi_set_mib_roam(sdev, NULL, 2511, 1);
 		slsi_set_mib_roam(sdev, NULL, SLSI_PSID_UNIFI_TPC_MAX_POWER_RSSI_THRESHOLD, 0);
 	}
@@ -251,6 +249,7 @@ static int slsi_net_stop(struct net_device *dev)
 
 	sdev->allow_switch_40_mhz = true;
 	sdev->allow_switch_80_mhz = true;
+	sdev->acs_channel_switched = false;
 	slsi_wakeunlock(&sdev->wlan_wl);
 	return 0;
 }
@@ -604,7 +603,6 @@ void slsi_tdls_move_packets(struct slsi_dev *sdev, struct net_device *dev,
 		slsi_spinlock_unlock(&tcp_ack->lock);
 	}
 
-	slsi_spinlock_lock(&netdev_vif->peer_lock);
 	/**
 	 * For TDLS connection set PEER valid to true. After this ndo_select_queue() will select TDLSQ instead of STAQ
 	 * For TDLS teardown set PEER valid to false. After this ndo_select_queue() will select STAQ instead of TDLSQ
@@ -692,8 +690,6 @@ void slsi_tdls_move_packets(struct slsi_dev *sdev, struct net_device *dev,
 		SLSI_NET_DBG2(dev, SLSI_TDLS, "NETQ%d: After : tdlsq_len = %d, staq_len = %d\n",
 			      i, skb_queue_len(&dev->_tx[tdlsq + i].qdisc->q), skb_queue_len(&dev->_tx[staq + i].qdisc->q));
 	}
-
-	slsi_spinlock_unlock(&netdev_vif->peer_lock);
 
 	/* Teardown - after teardown there should not be any packet in TDLS queues */
 	if (!connection)
@@ -1176,9 +1172,9 @@ int slsi_netif_add_locked(struct slsi_dev *sdev, const char *name, int ifnum)
 	return 0;
 
 exit_with_error:
-    SLSI_MUTEX_LOCK(sdev->netdev_remove_mutex);
+	SLSI_MUTEX_LOCK(sdev->netdev_remove_mutex);
 	free_netdev(dev);
-    SLSI_MUTEX_UNLOCK(sdev->netdev_remove_mutex);
+	SLSI_MUTEX_UNLOCK(sdev->netdev_remove_mutex);
 	return ret;
 }
 
@@ -1189,11 +1185,17 @@ int slsi_netif_dynamic_iface_add(struct slsi_dev *sdev, const char *name)
 
 	SLSI_MUTEX_LOCK(sdev->netdev_add_remove_mutex);
 
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
 	if (sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN] == sdev->netdev_ap) {
 		rcu_assign_pointer(sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN], NULL);
 		err = slsi_netif_add_locked(sdev, name, SLSI_NET_INDEX_P2PX_SWLAN);
 		index = err ? err : SLSI_NET_INDEX_P2PX_SWLAN;
 	}
+#else
+	err = slsi_netif_add_locked(sdev, name, SLSI_NET_INDEX_P2PX_SWLAN);
+	index = err ? err : SLSI_NET_INDEX_P2PX_SWLAN;
+#endif
+
 	SLSI_MUTEX_UNLOCK(sdev->netdev_add_remove_mutex);
 	return index;
 }
@@ -1224,7 +1226,8 @@ int slsi_netif_init(struct slsi_dev *sdev)
 		SLSI_MUTEX_UNLOCK(sdev->netdev_add_remove_mutex);
 		return -EINVAL;
 	}
-
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
 	if (slsi_netif_add_locked(sdev, CONFIG_SCSC_AP_INTERFACE_NAME, SLSI_NET_INDEX_P2PX_SWLAN) != 0) {
 		rtnl_lock();
 		slsi_netif_remove_locked(sdev, sdev->netdev[SLSI_NET_INDEX_WLAN]);
@@ -1233,12 +1236,18 @@ int slsi_netif_init(struct slsi_dev *sdev)
 		SLSI_MUTEX_UNLOCK(sdev->netdev_add_remove_mutex);
 		return -EINVAL;
 	}
+#endif
+#endif
 #if CONFIG_SCSC_WLAN_MAX_INTERFACES >= 4
 	if (slsi_netif_add_locked(sdev, "nan%d", SLSI_NET_INDEX_NAN) != 0) {
 		rtnl_lock();
 		slsi_netif_remove_locked(sdev, sdev->netdev[SLSI_NET_INDEX_WLAN]);
 		slsi_netif_remove_locked(sdev, sdev->netdev[SLSI_NET_INDEX_P2P]);
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
 		slsi_netif_remove_locked(sdev, sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN]);
+#endif
+#endif
 		rtnl_unlock();
 		SLSI_MUTEX_UNLOCK(sdev->netdev_add_remove_mutex);
 		return -EINVAL;
@@ -1348,9 +1357,9 @@ static void slsi_netif_remove_locked(struct slsi_dev *sdev, struct net_device *d
 		atomic_set(&ndev_vif->is_registered, 0);
 		unregister_netdevice(dev);
 	} else {
-        SLSI_MUTEX_LOCK(sdev->netdev_remove_mutex);
+		SLSI_MUTEX_LOCK(sdev->netdev_remove_mutex);
 		free_netdev(dev);
-        SLSI_MUTEX_UNLOCK(sdev->netdev_remove_mutex);
+		SLSI_MUTEX_UNLOCK(sdev->netdev_remove_mutex);
 	}
 }
 

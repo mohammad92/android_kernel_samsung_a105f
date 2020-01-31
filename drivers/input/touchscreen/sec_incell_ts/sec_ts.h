@@ -369,10 +369,12 @@
 #define SEC_TS_STATUS_CALIBRATION_SDC	0xA1
 #define SEC_TS_STATUS_CALIBRATION_SEC	0xA2
 
+/*
 #define SEC_TS_CMD_EDGE_HANDLER		0xAA
 #define SEC_TS_CMD_EDGE_AREA		0xAB
 #define SEC_TS_CMD_DEAD_ZONE		0xAC
-#define SEC_TS_CMD_LANDSCAPE_MODE	0xAD
+*/
+#define SEC_TS_CMD_LANDSCAPE_MODE	0x94
 
 enum grip_write_mode {
 	G_NONE				= 0,
@@ -692,6 +694,8 @@ struct sec_ts_data {
 	u8 grip_landscape_mode;
 	int grip_landscape_edge;
 	u16 grip_landscape_deadzone;
+	u16 grip_landscape_top_deadzone;
+	u16 grip_landscape_bottom_deadzone;
 
 	struct delayed_work ghost_check;
 	u8 tsp_dump_lock;

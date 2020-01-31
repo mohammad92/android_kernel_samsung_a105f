@@ -46,6 +46,8 @@ static enum power_supply_property s2mu106_otg_props[] = {
 };
 
 static int s2mu106_get_charging_health(struct s2mu106_charger_data *charger);
+static void s2mu106_set_input_current_limit(struct s2mu106_charger_data *charger, int charging_current);
+static int s2mu106_get_input_current_limit(struct s2mu106_charger_data *charger);
 
 static void s2mu106_test_read(struct i2c_client *i2c)
 {
@@ -139,13 +141,25 @@ static void s2mu106_enable_charger_switch(
 
 static void s2mu106_set_buck(
 	struct s2mu106_charger_data *charger, int enable) {
+	int prev_current;
 
 	if (enable) {
 		pr_info("[DEBUG]%s: set buck on\n", __func__);
 		s2mu106_enable_charger_switch(charger, charger->is_charging);
 	} else {
 		pr_info("[DEBUG]%s: set buck off (charger off mode)\n", __func__);
+		prev_current = s2mu106_get_input_current_limit(charger);
+		pr_info("[DEBUG]%s: check input current(%d, %d)\n",
+			__func__, prev_current, charger->input_current);
+		s2mu106_set_input_current_limit(charger, 50);
+		mdelay(50);
+		/* async mode */
+		s2mu106_update_reg(charger->i2c, 0x3A, 0x03, 0x03); 
+		mdelay(50);
 		s2mu106_update_reg(charger->i2c, S2MU106_CHG_CTRL0, CHARGER_OFF_MODE, REG_MODE_MASK);
+		/* auto async mode */
+		s2mu106_update_reg(charger->i2c, 0x3A, 0x01, 0x03);
+		s2mu106_set_input_current_limit(charger, prev_current);
 	}
 }
 
@@ -208,7 +222,9 @@ static void s2mu106_set_input_current_limit(
 	if (factory_mode)
 		return;
 
-	if (charging_current <= 100)
+	if (charging_current <= 50)
+		data = 0x00;
+	else if (charging_current <= 100)
 		data = 0x02;
 	else if (charging_current > 100 && charging_current <= 3000)
 		data = (charging_current - 50) / 25;
@@ -381,6 +397,12 @@ static bool s2mu106_chg_init(struct s2mu106_charger_data *charger)
 	s2mu106_update_reg(charger->i2c, 0x82, 0xF0, 0xF0);
 	s2mu106_write_reg(charger->i2c, 0xA3, 0x72);
 	s2mu106_write_reg(charger->i2c, 0xA4, 0x32);
+
+	/* change ramp delay 128usec 0x92[3:0] = 0x05 */
+	s2mu106_update_reg(charger->i2c, 0x92, 0x05, 0x0F);
+
+	/* OTG Fault debounce time set 15ms */
+	s2mu106_update_reg(charger->i2c, 0x94, 0x0C, 0x0C);
 
 #ifndef CONFIG_SEC_FACTORY
 	/* Prevent sudden power off when water detect */

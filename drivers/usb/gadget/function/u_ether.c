@@ -478,9 +478,12 @@ static void process_rx_w(struct work_struct *work)
 	struct eth_dev	*dev = container_of(work, struct eth_dev, rx_work);
 	struct sk_buff	*skb;
 	int		status = 0;
+	int is_ncm = 0;
 
 	if (!dev->port_usb)
 		return;
+	else
+		is_ncm = !strcmp(dev->port_usb->func.name,"ncm");
 
 	while ((skb = skb_dequeue(&dev->rx_frames))) {
 		if (status < 0
@@ -490,7 +493,7 @@ static void process_rx_w(struct work_struct *work)
 		/*
 		  Need to revisit net->mtu	does not include header size incase of changed MTU
 		*/
-			if(!strcmp(dev->port_usb->func.name,"ncm")) {
+			if(is_ncm) {
 				if (status < 0
 					|| ETH_HLEN > skb->len
 					|| skb->len > (dev->net->mtu + ETH_HLEN)) {
@@ -804,6 +807,8 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	unsigned long		flags;
 	struct usb_ep		*in;
 	u16			cdc_filter;
+	bool eth_multi_pkt_xfer = 0;
+	bool eth_supports_multi_frame = 0;
 #ifdef CONFIG_USB_RNDIS_MULTIPACKET_WITH_TIMER
 	if (dev->en_timer) {
 		hrtimer_cancel(&dev->tx_timer);
@@ -814,6 +819,8 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	if (dev->port_usb) {
 		in = dev->port_usb->in_ep;
 		cdc_filter = dev->port_usb->cdc_filter;
+		eth_multi_pkt_xfer = dev->port_usb->multi_pkt_xfer;
+		eth_supports_multi_frame = dev->port_usb->supports_multi_frame;
 	} else {
 		in = NULL;
 		cdc_filter = 0;
@@ -827,7 +834,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 
 #if 0
 	/* Allocate memory for tx_reqs to support multi packet transfer */
-	if (dev->port_usb->multi_pkt_xfer && !dev->tx_req_bufsize)
+	if (eth_multi_pkt_xfer && !dev->tx_req_bufsize)
 		alloc_tx_buffer(dev);
 #endif
 
@@ -887,7 +894,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 			/* Multi frame CDC protocols may store the frame for
 			 * later which is not a dropped frame.
 			 */
-			if (dev->port_usb->supports_multi_frame)
+			if (eth_supports_multi_frame)
 				goto multiframe;
 			goto drop;
 		}
@@ -897,7 +904,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	dev->tx_skb_hold_count++;
 	spin_unlock_irqrestore(&dev->req_lock, flags);
 
-	if (dev->port_usb->multi_pkt_xfer) {
+	if (eth_multi_pkt_xfer) {
 		memcpy(req->buf + req->length, skb->data, skb->len);
 		req->length = req->length + skb->len;
 		length = req->length;
@@ -939,7 +946,8 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		req->context = skb;
 	}
 #ifdef CONFIG_USB_RNDIS_MULTIPACKET_WITH_TIMER
-	retval = tx_task(dev, req);
+	if (dev->port_usb)
+		retval = tx_task(dev, req);
 #else
 	req->complete = tx_complete;
 
@@ -989,7 +997,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	}
 
 	if (retval) {
-		if (!dev->port_usb->multi_pkt_xfer)
+		if (!eth_multi_pkt_xfer)
 			dev_kfree_skb_any(skb);
 drop:
 		dev->net->stats.tx_dropped++;

@@ -38,6 +38,10 @@ struct ext4_encryption_policy {
 #define EXT4_POLICY_FLAGS_PAD_MASK	0x03
 #define EXT4_POLICY_FLAGS_VALID		0x03
 
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+#define EXT4_POLICY_FLAGS_PRIVATE_ALGO	0x4
+#endif
+
 /**
  * Encryption context for inode
  *

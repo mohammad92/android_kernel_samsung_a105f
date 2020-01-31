@@ -45,7 +45,9 @@
 //#define USE_COMMON_CAM_IO_PWR
 //#define DIVISION_EEP_IO_PWR                      /* Use Rear IO power for Front EEPROM i2c pull-up power */
 
-#define DISABLE_TDNR_IN_MCSC
+#define DISABLE_TDNR_IN_MCSC                       /* To disable TDNR, need disable USE_3DNR in SecCameraConfig */
+
+#define DDK_USE_SMALL_MEMORY                       /* DDK reduce memory for 2GB product 2019 A10 */
 
 #define ENABLE_MCSC_TDNR_VENDOR_SIZE
 #if defined(ENABLE_MCSC_TDNR_VENDOR_SIZE)

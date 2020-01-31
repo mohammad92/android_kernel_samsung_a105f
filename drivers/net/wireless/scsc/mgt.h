@@ -1,6 +1,6 @@
 /******************************************************************************
  *
- * Copyright (c) 2012 - 2018 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2012 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  *****************************************************************************/
 
@@ -44,6 +44,21 @@
 #define SLSI_EAPOL_KEY_INFO_LOWER_BYTE_POS                  (6)
 #define SLSI_EAPOL_KEY_DATA_LENGTH_HIGHER_BYTE_POS          (97)
 #define SLSI_EAPOL_KEY_DATA_LENGTH_LOWER_BYTE_POS           (98)
+
+#define SLSI_EAP_CODE_POS                 (4)
+#define SLSI_EAP_PACKET_REQUEST     (1)
+#define SLSI_EAP_PACKET_RESPONSE   (2)
+#define SLSI_EAP_PACKET_SUCCESS     (3)
+#define SLSI_EAP_PACKET_FAILURE      (4)
+#define SLSI_EAP_TYPE_POS                  (8)
+#define SLSI_EAP_TYPE_EXPANDED       (254)
+#define SLSI_EAP_OPCODE_POS                      (16)
+#define SLSI_EAP_OPCODE_WSC_MSG          (4)
+#define SLSI_EAP_OPCODE_WSC_START          (1)
+#define SLSI_EAP_MSGTYPE_POS                    (27)
+#define SLSI_EAP_MSGTYPE_M8                    (12)
+#define SLSI_EAP_WPS_DWELL_TIME           (100000)       /*100 ms */
+#define SLSI_EAP_TYPE_IDENTITY           (1)
 
 #define SLSI_80211_AC_VO 0
 #define SLSI_80211_AC_VI 1
@@ -446,6 +461,7 @@ int  slsi_update_packet_filters(struct slsi_dev *sdev, struct net_device *dev);
 int  slsi_clear_packet_filters(struct slsi_dev *sdev, struct net_device *dev);
 int slsi_ap_prepare_add_info_ies(struct netdev_vif *ndev_vif, const u8 *ies, size_t ies_len);
 int slsi_set_mib_roam(struct slsi_dev *dev, struct net_device *ndev, u16 psid, int value);
+void slsi_reset_throughput_stats(struct net_device *dev);
 int slsi_set_mib_rssi_boost(struct slsi_dev *sdev, struct net_device *dev, u16 psid, int index, int boost);
 void slsi_modify_ies_on_channel_switch(struct net_device *dev, struct cfg80211_ap_settings *settings,
 				       u8 *ds_params_ie, u8 *ht_operation_ie, struct ieee80211_mgmt  *mgmt,
@@ -453,7 +469,8 @@ void slsi_modify_ies_on_channel_switch(struct net_device *dev, struct cfg80211_a
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
 bool slsi_if_valid_wifi_sharing_channel(struct slsi_dev *sdev, int freq);
 void slsi_extract_valid_wifi_sharing_channels(struct slsi_dev *sdev);
-void slsi_select_wifi_sharing_ap_channel(struct wiphy *wiphy, struct net_device *dev,
+int slsi_check_if_non_indoor_channel(struct slsi_dev *sdev, int freq);
+int slsi_select_wifi_sharing_ap_channel(struct wiphy *wiphy, struct net_device *dev,
 					 struct cfg80211_ap_settings *settings, struct slsi_dev *sdev,
 					 int *wifi_sharing_channel_switched);
 int slsi_set_mib_wifi_sharing_5ghz_channel(struct slsi_dev *sdev, u16 psid, int value,
@@ -475,6 +492,7 @@ int slsi_read_unifi_countrylist(struct slsi_dev *sdev, u16 psid);
 int slsi_read_default_country(struct slsi_dev *sdev, u8 *alpha2, u16 index);
 int slsi_read_disconnect_ind_timeout(struct slsi_dev *sdev, u16 psid);
 int slsi_read_regulatory_rules(struct slsi_dev *sdev, struct slsi_802_11d_reg_domain *domain_info, const char *alpha2);
+int slsi_send_acs_event(struct slsi_dev *sdev, struct slsi_acs_selected_channels acs_selected_channels);
 #ifdef CONFIG_SCSC_WLAN_ENABLE_MAC_RANDOMISATION
 int slsi_set_mac_randomisation_mask(struct slsi_dev *sdev, u8 *mac_address_mask);
 #endif
@@ -492,6 +510,11 @@ int slsi_send_hanged_vendor_event(struct slsi_dev *sdev, u16 scsc_panic_code);
 void slsi_update_supported_channels_regd_flags(struct slsi_dev *sdev);
 #ifdef CONFIG_SCSC_WLAN_HANG_TEST
 int slsi_test_send_hanged_vendor_event(struct net_device *dev);
+#endif
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+int slsi_send_forward_beacon_vendor_event(struct slsi_dev *sdev, const u8 *ssid, const int ssid_len, const u8 *bssid,
+					  u8 channel, const u16 beacon_int, const u64 timestamp, const u64 sys_time);
+int slsi_send_forward_beacon_abort_vendor_event(struct slsi_dev *sdev, u16 reason_code);
 #endif
 void slsi_wlan_dump_public_action_subtype(struct slsi_dev *sdev, struct ieee80211_mgmt *mgmt, bool tx);
 void slsi_reset_channel_flags(struct slsi_dev *sdev);

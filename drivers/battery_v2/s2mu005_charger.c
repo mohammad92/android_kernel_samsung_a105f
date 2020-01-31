@@ -1133,9 +1133,7 @@ static int sec_chg_set_property(struct power_supply *psy,
 				charger->is_charging = true;
 				break;
 			}
-			value.intval = charger->is_charging;
-			psy_do_property("s2mu005-fuelgauge", set,
-				POWER_SUPPLY_PROP_CHARGING_ENABLED, value);
+
 			if (charger->dev_id >= 4) {
 				if (buck_state) {
 					s2mu005_enable_charger_switch(charger, charger->is_charging);
@@ -1146,6 +1144,11 @@ static int sec_chg_set_property(struct power_supply *psy,
 			} else {
 				s2mu005_enable_charger_switch(charger, charger->is_charging);
 			}
+
+			value.intval = charger->is_charging;
+			psy_do_property("s2mu005-fuelgauge", set,
+				POWER_SUPPLY_PROP_CHARGING_ENABLED, value);
+
 		} else {
 			pr_info("[DEBUG]%s: SKIP CHARGING CONTROL while OTG(%d)\n",
 				__func__, value.intval);

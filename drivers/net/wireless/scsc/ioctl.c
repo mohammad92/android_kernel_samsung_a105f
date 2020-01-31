@@ -18,6 +18,7 @@
 #include <scsc/scsc_mx.h>
 #include <scsc/scsc_log_collector.h>
 #include "dev.h"
+#include "fapi.h"
 
 #define CMD_RXFILTERADD         "RXFILTER-ADD"
 #define CMD_RXFILTERREMOVE              "RXFILTER-REMOVE"
@@ -85,6 +86,10 @@
 #define CMD_GETSTAINFO "GETSTAINFO"
 #define CMD_GETASSOCREJECTINFO "GETASSOCREJECTINFO"
 
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+#define CMD_BEACON_RECV "BEACON_RECV"
+#endif
+
 /* Known commands from framework for which no handlers */
 #define CMD_AMPDU_MPDU "AMPDU_MPDU"
 #define CMD_BTCOEXMODE "BTCOEXMODE"
@@ -106,6 +111,7 @@
 #define CMD_SET_TX_POWER_CALLING "SET_TX_POWER_CALLING"
 
 #define CMD_DRIVERDEBUGDUMP "DEBUG_DUMP"
+#define CMD_DRIVERDEBUGCOMMAND "DEBUG_COMMAND"
 #define CMD_TESTFORCEHANG "SLSI_TEST_FORCE_HANG"
 #define CMD_GETREGULATORY "GETREGULATORY"
 
@@ -659,17 +665,26 @@ static ssize_t slsi_rx_filter_num_write(struct net_device *dev, int add_remove, 
 }
 
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if !defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION < 90000)
 static ssize_t slsi_create_interface(struct net_device *dev, char *intf_name)
 {
 	struct netdev_vif *ndev_vif = netdev_priv(dev);
 	struct slsi_dev   *sdev = ndev_vif->sdev;
-	struct net_device   *swlan_dev;
+	struct net_device   *ap_dev;
 
-	swlan_dev = slsi_get_netdev(sdev, SLSI_NET_INDEX_P2PX_SWLAN);
-	if (swlan_dev && (strcmp(swlan_dev->name, intf_name) == 0))
+	ap_dev = slsi_get_netdev(sdev, SLSI_NET_INDEX_P2PX_SWLAN);
+	if (ap_dev && (strcmp(ap_dev->name, intf_name) == 0)) {
+		SLSI_NET_ERR(dev, "%s already created\n", intf_name);
+		return -EINVAL;
+	}
+
+	ap_dev = slsi_dynamic_interface_create(sdev->wiphy, intf_name, NL80211_IFTYPE_AP, NULL);
+	if (ap_dev) {
+		sdev->netdev_ap = ap_dev;
 		return 0;
+	}
 
-	SLSI_NET_ERR(dev, "Failed to create interface %s\n", intf_name);
+	SLSI_NET_ERR(dev, "Failed to create AP interface %s\n", intf_name);
 	return -EINVAL;
 }
 
@@ -677,19 +692,26 @@ static ssize_t slsi_delete_interface(struct net_device *dev, char *intf_name)
 {
 	struct netdev_vif *ndev_vif = netdev_priv(dev);
 	struct slsi_dev   *sdev = ndev_vif->sdev;
-	struct net_device   *swlan_dev;
 
-	swlan_dev = slsi_get_netdev(sdev, SLSI_NET_INDEX_P2PX_SWLAN);
-	if (swlan_dev && (strcmp(swlan_dev->name, intf_name) == 0)) {
-		ndev_vif = netdev_priv(swlan_dev);
-		if (ndev_vif->activated)
-			slsi_stop_net_dev(sdev, swlan_dev);
-		return 0;
+	if (strcmp(intf_name, CONFIG_SCSC_AP_INTERFACE_NAME) == 0)
+		dev = sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN];
+
+	if (!dev) {
+		SLSI_WARN(sdev, "AP dev is NULL");
+		return -EINVAL;
 	}
+	ndev_vif = netdev_priv(dev);
 
-	SLSI_NET_ERR(dev, "Failed to delete interface %s\n", intf_name);
-	return -EINVAL;
+	if (ndev_vif->activated)
+		slsi_stop_net_dev(sdev, dev);
+	slsi_netif_remove_rtlnl_locked(sdev, dev);
+
+	sdev->netdev_ap = NULL;
+	SLSI_DBG1_NODEV(SLSI_MLME, "Successfully deleted AP interface %s ", intf_name);
+
+	return 0;
 }
+#endif
 
 static ssize_t slsi_set_indoor_channels(struct net_device *dev, char *arg)
 {
@@ -1584,6 +1606,58 @@ static ssize_t slsi_country_write(struct net_device *dev, char *country_code)
 	return status;
 }
 
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+static ssize_t slsi_forward_beacon(struct net_device *dev, char *action)
+{
+	struct netdev_vif *netdev_vif = netdev_priv(dev);
+	struct slsi_dev   *sdev = netdev_vif->sdev;
+	int               intended_action = 0;
+	int               ret = 0;
+
+	if (strncasecmp(action, "stop", 4) == 0) {
+		intended_action = FAPI_ACTION_STOP;
+	} else if (strncasecmp(action, "start", 5) == 0) {
+		intended_action = FAPI_ACTION_START;
+	} else {
+		SLSI_NET_ERR(dev, "BEACON_RECV should be used with start or stop\n");
+		return -EINVAL;
+	}
+
+	SLSI_NET_DBG2(dev, SLSI_MLME, "BEACON_RECV %s!!\n", intended_action ? "START" : "STOP");
+	SLSI_MUTEX_LOCK(netdev_vif->vif_mutex);
+
+	if ((!netdev_vif->activated) || (netdev_vif->vif_type != FAPI_VIFTYPE_STATION) ||
+	    (netdev_vif->sta.vif_status != SLSI_VIF_STATUS_CONNECTED)) {
+		SLSI_ERR(sdev, "Not a STA vif or status is not CONNECTED\n");
+		ret = -EINVAL;
+		goto exit_vif_mutex;
+	}
+
+	if (((intended_action == FAPI_ACTION_START) && netdev_vif->is_wips_running) ||
+	    ((intended_action == FAPI_ACTION_STOP) && !netdev_vif->is_wips_running)) {
+		SLSI_NET_INFO(dev, "Forwarding beacon is already %s!!\n",
+			      netdev_vif->is_wips_running ? "running" : "stopped");
+		ret = 0;
+		goto exit_vif_mutex;
+	}
+
+	SLSI_MUTEX_LOCK(netdev_vif->scan_mutex);
+	if (intended_action == FAPI_ACTION_START &&
+	    (netdev_vif->scan[SLSI_SCAN_HW_ID].scan_req || netdev_vif->sta.roam_in_progress)) {
+		SLSI_NET_ERR(dev, "Rejecting BEACON_RECV start as scan/roam is running\n");
+		ret = -EBUSY;
+		goto exit_scan_mutex;
+	}
+
+	ret = slsi_mlme_set_forward_beacon(sdev, dev, intended_action);
+exit_scan_mutex:
+	SLSI_MUTEX_UNLOCK(netdev_vif->scan_mutex);
+exit_vif_mutex:
+	SLSI_MUTEX_UNLOCK(netdev_vif->vif_mutex);
+	return ret;
+}
+#endif
+
 static ssize_t slsi_update_rssi_boost(struct net_device *dev, char *rssi_boost_string)
 {
 	struct netdev_vif *netdev_vif = netdev_priv(dev);
@@ -1904,6 +1978,9 @@ static int slsi_get_supported_channels(struct slsi_dev *sdev, struct net_device 
 		chan_count = supported_chan_mib.data[i*2 + 1];
 		if (chan_start == 1) { /* for 2.4GHz */
 			supported_channels[supp_chan_length].start_chan_num = 1;
+			if (!(sdev->device_config.host_state & FAPI_HOSTSTATE_CELLULAR_ACTIVE) &&
+			    chan_count > 11 && sdev->device_config.disable_ch12_ch13)
+				chan_count = 11;
 			supported_channels[supp_chan_length].channel_count = chan_count;
 			supported_channels[supp_chan_length].increment = 1;
 			supported_channels[supp_chan_length].band = NL80211_BAND_2GHZ;
@@ -1992,6 +2069,19 @@ static int slsi_get_regulatory(struct net_device *dev, char *buf, int buf_len)
 		return -ENOMEM;
 }
 
+void slsi_disable_ch12_13(struct slsi_dev *sdev)
+{
+	struct wiphy *wiphy = sdev->wiphy;
+	struct ieee80211_channel *chan;
+
+	if (wiphy->bands[0]) {
+		chan = &wiphy->bands[0]->channels[11];
+		chan->flags |= IEEE80211_CHAN_DISABLED;
+		chan = &wiphy->bands[0]->channels[12];
+		chan->flags |= IEEE80211_CHAN_DISABLED;
+	}
+}
+
 int slsi_set_fcc_channel(struct net_device *dev, char *cmd, int cmd_len)
 {
 	struct netdev_vif    *ndev_vif = netdev_priv(dev);
@@ -2027,6 +2117,8 @@ int slsi_set_fcc_channel(struct net_device *dev, char *cmd, int cmd_len)
 				slsi_reset_channel_flags(sdev);
 				wiphy_apply_custom_regulatory(sdev->wiphy, sdev->device_config.domain_info.regdomain);
 				slsi_update_supported_channels_regd_flags(sdev);
+				if (flight_mode_ena && sdev->device_config.disable_ch12_ch13)
+					slsi_disable_ch12_13(sdev);
 			}
 		}
 	}
@@ -2126,6 +2218,24 @@ int slsi_get_sta_info(struct net_device *dev, char *command, int buf_len)
 		return -EINVAL;
 	}
 
+#if defined(ANDROID_VERSION) && (ANDROID_VERSION >= 90000)
+	len = snprintf(command, buf_len, "GETSTAINFO %pM Rx_Retry_Pkts=%d Rx_BcMc_Pkts=%d CAP=%04x %02x:%02x:%02x ",
+		       ndev_vif->ap.last_disconnected_sta.address,
+		       ndev_vif->ap.last_disconnected_sta.rx_retry_packets,
+		       ndev_vif->ap.last_disconnected_sta.rx_bc_mc_packets,
+		       ndev_vif->ap.last_disconnected_sta.capabilities,
+		       ndev_vif->ap.last_disconnected_sta.address[0],
+		       ndev_vif->ap.last_disconnected_sta.address[1],
+		       ndev_vif->ap.last_disconnected_sta.address[2]);
+
+	len += snprintf(&command[len], (buf_len - len), "%d %d %d %d %d %d %d %u %d",
+		       ieee80211_frequency_to_channel(ndev_vif->ap.channel_freq),
+		       ndev_vif->ap.last_disconnected_sta.bandwidth, ndev_vif->ap.last_disconnected_sta.rssi,
+		       ndev_vif->ap.last_disconnected_sta.tx_data_rate, ndev_vif->ap.last_disconnected_sta.mode,
+		       ndev_vif->ap.last_disconnected_sta.antenna_mode,
+		       ndev_vif->ap.last_disconnected_sta.mimo_used, ndev_vif->ap.last_disconnected_sta.reason,
+		       ndev_vif->ap.last_disconnected_sta.support_mode);
+#else
 	len = snprintf(command, buf_len, "wl_get_sta_info : %02x%02x%02x %u %d %d %d %d %d %d %u ",
 		       ndev_vif->ap.last_disconnected_sta.address[0], ndev_vif->ap.last_disconnected_sta.address[1],
 		       ndev_vif->ap.last_disconnected_sta.address[2], ndev_vif->ap.channel_freq,
@@ -2133,6 +2243,7 @@ int slsi_get_sta_info(struct net_device *dev, char *command, int buf_len)
 		       ndev_vif->ap.last_disconnected_sta.tx_data_rate, ndev_vif->ap.last_disconnected_sta.mode,
 		       ndev_vif->ap.last_disconnected_sta.antenna_mode,
 		       ndev_vif->ap.last_disconnected_sta.mimo_used, ndev_vif->ap.last_disconnected_sta.reason);
+#endif
 
 	SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
 
@@ -2244,6 +2355,7 @@ int slsi_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 		ret = slsi_rx_filter_num_write(dev, 0, filter_num);
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if !defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION < 90000)
 	} else if (strncasecmp(command, CMD_INTERFACE_CREATE, strlen(CMD_INTERFACE_CREATE)) == 0) {
 		char *intf_name = command + strlen(CMD_INTERFACE_CREATE) + 1;
 
@@ -2252,6 +2364,7 @@ int slsi_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		char *intf_name = command + strlen(CMD_INTERFACE_DELETE) + 1;
 
 		ret = slsi_delete_interface(dev, intf_name);
+#endif
 	} else if (strncasecmp(command, CMD_SET_INDOOR_CHANNELS, strlen(CMD_SET_INDOOR_CHANNELS)) == 0) {
 		char *arg = command + strlen(CMD_SET_INDOOR_CHANNELS) + 1;
 
@@ -2398,6 +2511,12 @@ int slsi_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		char *country_code = command + strlen(CMD_COUNTRY) + 1;
 
 		ret = slsi_country_write(dev, country_code);
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+	} else if (strncasecmp(command, CMD_BEACON_RECV, strlen(CMD_BEACON_RECV)) == 0) {
+		char *action = command + strlen(CMD_BEACON_RECV) + 1;
+
+		ret = slsi_forward_beacon(dev, action);
+#endif
 	} else if (strncasecmp(command, CMD_SETAPP2PWPSIE, strlen(CMD_SETAPP2PWPSIE)) == 0) {
 		ret = slsi_set_ap_p2p_wps_ie(dev, command, priv_cmd.total_len);
 	} else if (strncasecmp(command, CMD_P2PSETPS, strlen(CMD_P2PSETPS)) == 0) {
@@ -2465,10 +2584,11 @@ int slsi_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			(strncasecmp(command, CMD_SETSINGLEANT, strlen(CMD_SETSINGLEANT)) == 0)) {
 		ret  = -ENOTSUPP;
 #ifndef SLSI_TEST_DEV
-	} else if (strncasecmp(command, CMD_DRIVERDEBUGDUMP, strlen(CMD_DRIVERDEBUGDUMP)) == 0) {
+	} else if ((strncasecmp(command, CMD_DRIVERDEBUGDUMP, strlen(CMD_DRIVERDEBUGDUMP)) == 0) ||
+		(strncasecmp(command, CMD_DRIVERDEBUGCOMMAND, strlen(CMD_DRIVERDEBUGCOMMAND)) == 0)) {
 		slsi_dump_stats(dev);
 #ifdef CONFIG_SCSC_LOG_COLLECTION
-		scsc_log_collector_schedule_collection(SCSC_LOG_HOST_WLAN, SCSC_LOG_HOST_WLAN_REASON_DRIVERDEBUGDUMP);
+		scsc_log_collector_schedule_collection(SCSC_LOG_DUMPSTATE, SCSC_LOG_DUMPSTATE_REASON_DRIVERDEBUGDUMP);
 #else
 		ret = mx140_log_dump();
 #endif

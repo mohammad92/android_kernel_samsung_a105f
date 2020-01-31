@@ -15,6 +15,7 @@
 #include "fimc-is-cis.h"
 #include "fimc-is-cis-3l6.h"
 
+
 /*
 File used: 3L6_EVT1_Ver_1.8.xlsx
 version : 1.8
@@ -45,7 +46,7 @@ const u32 sensor_3l6_setfile_B_Global[] = {
 	0x3084,	0x1314, 0x02,
 	0x3086,	0x0CE7, 0x02,
 	0x3004,	0x0800, 0x02,
-
+	0x3C66,	0x0100, 0x02,	// Master mode disable
 };
 const u32 sensor_3l6_setfile_B_4128x3096_30fps[] = {
 	//mode change   Single Still Capture (4:3)

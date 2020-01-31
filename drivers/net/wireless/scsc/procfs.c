@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- * Copyright (c) 2012 - 2017 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2012 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  ****************************************************************************/
 
@@ -14,6 +14,7 @@
 #include "hip.h"
 #include "netif.h"
 #include "ioctl.h"
+#include "nl80211_vendor.h"
 
 #include "mib.h"
 
@@ -110,46 +111,56 @@ static ssize_t slsi_procfs_throughput_stats_read(struct file *file,  char __user
 	const size_t      bufsz = sizeof(buf);
 	struct slsi_dev   *sdev = (struct slsi_dev *)file->private_data;
 	struct net_device *dev;
+	struct netdev_vif *ndev_vif;
 	struct slsi_mib_data      mibrsp = { 0, NULL };
 	struct slsi_mib_value     *values = NULL;
-	struct slsi_mib_get_entry get_values[] = {{ SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 2, 0 } },
-						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 3, 0 } },
+	struct slsi_mib_get_entry get_values[] = {{ SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 3, 0 } },
 						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 4, 0 } },
-						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 24, 0 } },
-						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 29, 0 } } };
+						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 5, 0 } },
+						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 25, 0 } },
+						 { SLSI_PSID_UNIFI_THROUGHPUT_DEBUG, { 30, 0 } } };
 
 	SLSI_UNUSED_PARAMETER(file);
 
 	dev = slsi_get_netdev(sdev, 1);
+	ndev_vif = netdev_priv(dev);
 
-	mibrsp.dataLength = 15 * ARRAY_SIZE(get_values);
-	mibrsp.data = kmalloc(mibrsp.dataLength, GFP_KERNEL);
-	if (!mibrsp.data)
-		SLSI_ERR(sdev, "Cannot kmalloc %d bytes\n", mibrsp.dataLength);
-	values = slsi_read_mibs(sdev, dev, get_values, ARRAY_SIZE(get_values), &mibrsp);
-	if (!values) {
+	if (ndev_vif->activated) {
+		mibrsp.dataLength = 15 * ARRAY_SIZE(get_values);
+		mibrsp.data = kmalloc(mibrsp.dataLength, GFP_KERNEL);
+		if (!mibrsp.data)
+			SLSI_ERR(sdev, "Cannot kmalloc %d bytes\n", mibrsp.dataLength);
+		values = slsi_read_mibs(sdev, dev, get_values, ARRAY_SIZE(get_values), &mibrsp);
+		if (!values) {
+			kfree(mibrsp.data);
+			return -EINVAL;
+		}
+		if (values[0].type != SLSI_MIB_TYPE_UINT)
+			SLSI_ERR(sdev, "invalid type. iter:%d", 0); /*bad_fcs_count*/
+		if (values[1].type != SLSI_MIB_TYPE_UINT)
+			SLSI_ERR(sdev, "invalid type. iter:%d", 1); /*missed_ba_count*/
+		if (values[2].type != SLSI_MIB_TYPE_UINT)
+			SLSI_ERR(sdev, "invalid type. iter:%d", 2); /*missed_ack_count*/
+		if (values[3].type != SLSI_MIB_TYPE_UINT)
+			SLSI_ERR(sdev, "invalid type. iter:%d", 3); /*mac_bad_sig_count*/
+		if (values[4].type != SLSI_MIB_TYPE_UINT)
+			SLSI_ERR(sdev, "invalid type. iter:%d", 4); /*rx_error_count*/
+
+		pos += scnprintf(buf, bufsz, "RX FCS:             %d\n", values[0].u.uintValue);
+		pos += scnprintf(buf + pos, bufsz - pos, "RX bad SIG:         %d\n", values[3].u.uintValue);
+		pos += scnprintf(buf + pos, bufsz - pos, "RX dot11 error:     %d\n", values[4].u.uintValue);
+		pos += scnprintf(buf + pos, bufsz - pos, "TX MPDU no ACK:     %d\n", values[2].u.uintValue);
+		pos += scnprintf(buf + pos, bufsz - pos, "TX A-MPDU no ACK:   %d\n", values[1].u.uintValue);
+
+		kfree(values);
 		kfree(mibrsp.data);
-		return -EINVAL;
+	} else {
+		pos += scnprintf(buf, bufsz, "RX FCS:             %d\n", 0);
+		pos += scnprintf(buf + pos, bufsz - pos, "RX bad SIG:         %d\n", 0);
+		pos += scnprintf(buf + pos, bufsz - pos, "RX dot11 error:     %d\n", 0);
+		pos += scnprintf(buf + pos, bufsz - pos, "TX MPDU no ACK:     %d\n", 0);
+		pos += scnprintf(buf + pos, bufsz - pos, "TX A-MPDU no ACK:   %d\n", 0);
 	}
-	if (values[0].type != SLSI_MIB_TYPE_UINT)
-		SLSI_ERR(sdev, "invalid type. iter:%d", 0); /*bad_fcs_count*/
-	if (values[1].type != SLSI_MIB_TYPE_UINT)
-		SLSI_ERR(sdev, "invalid type. iter:%d", 1); /*missed_ba_count*/
-	if (values[2].type != SLSI_MIB_TYPE_UINT)
-		SLSI_ERR(sdev, "invalid type. iter:%d", 2); /*missed_ack_count*/
-	if (values[3].type != SLSI_MIB_TYPE_UINT)
-		SLSI_ERR(sdev, "invalid type. iter:%d", 3); /*mac_bad_sig_count*/
-	if (values[4].type != SLSI_MIB_TYPE_UINT)
-		SLSI_ERR(sdev, "invalid type. iter:%d", 4); /*rx_error_count*/
-
-	pos += scnprintf(buf, bufsz, "RX FCS:             %d\n", values[0].u.uintValue);
-	pos += scnprintf(buf + pos, bufsz - pos, "RX bad SIG:         %d\n", values[3].u.uintValue);
-	pos += scnprintf(buf + pos, bufsz - pos, "RX dot11 error:     %d\n", values[4].u.uintValue);
-	pos += scnprintf(buf + pos, bufsz - pos, "TX MPDU no ACK:     %d\n", values[2].u.uintValue);
-	pos += scnprintf(buf + pos, bufsz - pos, "TX A-MPDU no ACK:   %d\n", values[1].u.uintValue);
-
-	kfree(values);
-	kfree(mibrsp.data);
 
 	return simple_read_from_buffer(user_buf, count, ppos, buf, pos);
 }
@@ -410,8 +421,19 @@ static int slsi_procfs_build_show(struct seq_file *m, void *v)
 #else
 	seq_puts(m, "CONFIG_SCSC_WLAN_SINGLE_ANTENNA                   : n\n");
 #endif
+#ifdef CONFIG_SCSC_AP_INTERFACE_NAME
 	seq_printf(m, "CONFIG_SCSC_AP_INTERFACE_NAME                   : %s\n", CONFIG_SCSC_AP_INTERFACE_NAME);
-
+#endif
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	seq_puts(m, "CONFIG_SCSC_WIFI_NAN_ENABLE                       : y\n");
+#else
+	seq_puts(m, "CONFIG_SCSC_WIFI_NAN_ENABLE                       : n\n");
+#endif
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+	seq_puts(m, "CONFIG_SLSI_WLAN_STA_FWD_BEACON                   : y\n");
+#else
+	seq_puts(m, "CONFIG_SLSI_WLAN_STA_FWD_BEACON                   : n\n");
+#endif
 	return 0;
 }
 
@@ -1013,6 +1035,24 @@ static int slsi_procfs_tcp_ack_suppression_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+static ssize_t slsi_procfs_nan_mac_addr_read(struct file *file,	char __user *user_buf, size_t count, loff_t *ppos)
+{
+	char              buf[20];
+	char              nan_mac[ETH_ALEN];
+	int               pos = 0;
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	struct slsi_dev  *sdev = (struct slsi_dev *)file->private_data;
+
+	slsi_nan_get_mac(sdev, nan_mac);
+#else
+
+	SLSI_UNUSED_PARAMETER(file);
+	memset(nan_mac, 0, ETH_ALEN);
+#endif
+	pos = scnprintf(buf, sizeof(buf), "%pM", nan_mac);
+	return simple_read_from_buffer(user_buf, count, ppos, buf, pos);
+}
+
 SLSI_PROCFS_SEQ_FILE_OPS(vifs);
 SLSI_PROCFS_SEQ_FILE_OPS(mac_addr);
 SLSI_PROCFS_WRITE_FILE_OPS(uapsd);
@@ -1039,6 +1079,8 @@ SLSI_PROCFS_READ_FILE_OPS(sta_bss);
 SLSI_PROCFS_READ_FILE_OPS(big_data);
 SLSI_PROCFS_READ_FILE_OPS(throughput_stats);
 SLSI_PROCFS_SEQ_FILE_OPS(tcp_ack_suppression);
+SLSI_PROCFS_READ_FILE_OPS(nan_mac_addr);
+
 
 int slsi_create_proc_dir(struct slsi_dev *sdev)
 {
@@ -1079,9 +1121,12 @@ int slsi_create_proc_dir(struct slsi_dev *sdev)
 		SLSI_PROCFS_ADD_FILE(sdev, big_data, parent, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 		SLSI_PROCFS_ADD_FILE(sdev, throughput_stats, parent, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 		SLSI_PROCFS_SEQ_ADD_FILE(sdev, tcp_ack_suppression, sdev->procfs_dir, S_IRUSR | S_IRGRP);
+		SLSI_PROCFS_ADD_FILE(sdev, nan_mac_addr, parent, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+		return 0;
 	}
 
 err:
+	SLSI_DBG1(sdev, SLSI_HIP, "Failure in creation of proc directories\n");
 	return -EINVAL;
 }
 
@@ -1117,6 +1162,7 @@ void slsi_remove_proc_dir(struct slsi_dev *sdev)
 		SLSI_PROCFS_REMOVE_FILE(big_data, sdev->procfs_dir);
 		SLSI_PROCFS_REMOVE_FILE(throughput_stats, sdev->procfs_dir);
 		SLSI_PROCFS_REMOVE_FILE(tcp_ack_suppression, sdev->procfs_dir);
+		SLSI_PROCFS_REMOVE_FILE(nan_mac_addr, sdev->procfs_dir);
 
 		(void)snprintf(dir, sizeof(dir), "driver/unifi%d", sdev->procfs_instance);
 		remove_proc_entry(dir, NULL);

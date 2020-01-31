@@ -2023,7 +2023,7 @@ static int s2mu004_muic_detect_jig_dev_type(struct s2mu004_muic_data *muic_data,
 	default:
 		break;
 	}
-	
+
     switch (read_val[READ_VAL_DEVICE_TYPE3]) {
     case DEV_TYPE3_VBUS_R255:
 	    if (!vbvolt)
@@ -2288,6 +2288,13 @@ jig:
 				pr_info("[muic] %s, skipped handle detach!\n", __func__);
 				return;
 			}
+		}
+#endif
+#if IS_ENABLED(CONFIG_HV_MUIC_S2MU004_AFC)
+		ret = s2mu004_i2c_read_byte(muic_data->i2c, S2MU004_REG_AFC_CTRL1);
+		if (ret) {
+			pr_info("%s, need to AFC detach\n", __func__);
+			s2mu004_hv_muic_reset_hvcontrol_reg(muic_data);
 		}
 #endif
 		muic_core_handle_detach(muic_data->pdata);

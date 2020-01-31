@@ -251,7 +251,11 @@ int ext4_get_encryption_info(struct inode *inode)
 	if (!crypt_info)
 		return -ENOMEM;
 
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+	crypt_info->ci_flags = ctx.flags & EXT4_POLICY_FLAGS_PAD_MASK;
+#else
 	crypt_info->ci_flags = ctx.flags;
+#endif
 	crypt_info->ci_data_mode = ctx.contents_encryption_mode;
 	crypt_info->ci_filename_mode = ctx.filenames_encryption_mode;
 #ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
@@ -286,12 +290,18 @@ int ext4_get_encryption_info(struct inode *inode)
 #ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
 	case EXT4_PRIVATE_ENCRYPTION_MODE_AES_256_XTS:
 		cipher_str = "xts(aes)";
+		if (ctx.flags & EXT4_POLICY_FLAGS_PRIVATE_ALGO)
+			inode->i_mapping->private_algo_mode = EXYNOS_FMP_ALGO_MODE_AES_XTS;
 		break;
 	case EXT4_PRIVATE_ENCRYPTION_MODE_AES_256_CBC:
 		cipher_str = "cbc(aes)";
+		if (ctx.flags & EXT4_POLICY_FLAGS_PRIVATE_ALGO)
+			inode->i_mapping->private_algo_mode = EXYNOS_FMP_ALGO_MODE_AES_CBC;
 		break;
 	case EXT4_ENCRYPTION_MODE_PRIVATE:
 		cipher_str = "xts(aes)";
+		if (ctx.flags & EXT4_POLICY_FLAGS_PRIVATE_ALGO)
+			inode->i_mapping->private_algo_mode = EXYNOS_FMP_ALGO_MODE_AES_XTS;
 		break;
 #endif /* CONFIG_EXT4_PRIVATE_ENCRYPTION */
 	case EXT4_ENCRYPTION_MODE_AES_256_HEH:

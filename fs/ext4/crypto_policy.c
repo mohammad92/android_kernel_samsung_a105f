@@ -42,8 +42,12 @@ static int ext4_is_encryption_context_consistent_with_policy(
 		return 0;
 	return (memcmp(ctx.master_key_descriptor, policy->master_key_descriptor,
 			EXT4_KEY_DESCRIPTOR_SIZE) == 0 &&
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+		((ctx.flags & EXT4_POLICY_FLAGS_PAD_MASK) == (policy->flags & EXT4_POLICY_FLAGS_PAD_MASK)) &&
+#else
 		(ctx.flags ==
 		 policy->flags) &&
+#endif
 		(ctx.contents_encryption_mode ==
 		 policy->contents_encryption_mode) &&
 		(ctx.filenames_encryption_mode ==
@@ -146,7 +150,11 @@ int ext4_get_policy(struct inode *inode, struct ext4_encryption_policy *policy)
 	policy->version = 0;
 	policy->contents_encryption_mode = ctx.contents_encryption_mode;
 	policy->filenames_encryption_mode = ctx.filenames_encryption_mode;
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+	policy->flags = ctx.flags & EXT4_POLICY_FLAGS_PAD_MASK;
+#else
 	policy->flags = ctx.flags;
+#endif
 	memcpy(&policy->master_key_descriptor, ctx.master_key_descriptor,
 	       EXT4_KEY_DESCRIPTOR_SIZE);
 	return 0;
@@ -223,7 +231,11 @@ int ext4_is_child_context_consistent_with_parent(struct inode *parent,
 		 child_ctx.contents_encryption_mode) &&
 		(parent_ctx.filenames_encryption_mode ==
 		 child_ctx.filenames_encryption_mode) &&
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+		((parent_ctx.flags & EXT4_POLICY_FLAGS_PAD_MASK) == (child_ctx.flags & EXT4_POLICY_FLAGS_PAD_MASK));
+#else
 		(parent_ctx.flags == child_ctx.flags);
+#endif
 }
 
 /**
@@ -259,6 +271,10 @@ int ext4_inherit_context(struct inode *parent, struct inode *child)
 		ctx.contents_encryption_mode = ci->ci_data_mode;
 		ctx.filenames_encryption_mode = ci->ci_filename_mode;
 		ctx.flags = ci->ci_flags;
+#ifdef CONFIG_EXT4_PRIVATE_ENCRYPTION
+		if (!S_ISDIR(child->i_mode))
+			ctx.flags |= EXT4_POLICY_FLAGS_PRIVATE_ALGO;
+#endif
 		memcpy(ctx.master_key_descriptor, ci->ci_master_key,
 		       EXT4_KEY_DESCRIPTOR_SIZE);
 	}

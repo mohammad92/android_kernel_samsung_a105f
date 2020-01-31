@@ -25,12 +25,12 @@
 #include "kic.h"
 #endif
 
-static char *mib_file = "wlan.hcf";
-module_param(mib_file, charp, S_IRUGO | S_IWUSR);
+char *slsi_mib_file = "wlan.hcf";
+module_param_named(mib_file, slsi_mib_file, charp, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mib_file, "mib data filename");
 
-static char *mib_file2 = "wlan_sw.hcf";
-module_param(mib_file2, charp, S_IRUGO | S_IWUSR);
+char *slsi_mib_file2 = "wlan_sw.hcf";
+module_param_named(mib_file2, slsi_mib_file2, charp, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mib_file2, "sw mib data filename");
 
 static char *local_mib_file = "localmib.hcf";
@@ -45,7 +45,7 @@ static bool term_udi_users = true;
 module_param(term_udi_users, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(term_udi_users, "Try to terminate UDI user space users (applications) connected on the cdev (0, 1)");
 
-static int sig_wait_cfm_timeout = 3000;
+static int sig_wait_cfm_timeout = 6000;
 module_param(sig_wait_cfm_timeout, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(sig_wait_cfm_timeout, "Signal wait timeout in milliseconds (default: 3000)");
 
@@ -251,12 +251,10 @@ struct slsi_dev *slsi_dev_attach(struct device *dev, struct scsc_mx *core, struc
 	sdev->mlme_blocked = false;
 
 	SLSI_MUTEX_INIT(sdev->netdev_add_remove_mutex);
-    SLSI_MUTEX_INIT(sdev->netdev_remove_mutex);
+	SLSI_MUTEX_INIT(sdev->netdev_remove_mutex);
 	SLSI_MUTEX_INIT(sdev->start_stop_mutex);
 	SLSI_MUTEX_INIT(sdev->device_config_mutex);
-#ifdef CONFIG_SCSC_WLAN_ENHANCED_LOGGING
 	SLSI_MUTEX_INIT(sdev->logger_mutex);
-#endif
 
 	sdev->dev = dev;
 	sdev->maxwell_core = core;
@@ -266,11 +264,12 @@ struct slsi_dev *slsi_dev_attach(struct device *dev, struct scsc_mx *core, struc
 	sdev->p2p_certif = false;
 	sdev->allow_switch_40_mhz = true;
 	sdev->allow_switch_80_mhz = true;
-	sdev->mib[0].mib_file_name = mib_file;
-	sdev->mib[1].mib_file_name = mib_file2;
+	sdev->mib[0].mib_file_name = slsi_mib_file;
+	sdev->mib[1].mib_file_name = slsi_mib_file2;
 	sdev->local_mib.mib_file_name = local_mib_file;
 	sdev->maddr_file_name = maddr_file;
 	sdev->device_config.qos_info = -1;
+	sdev->acs_channel_switched = false;
 	memset(&sdev->chip_info_mib, 0xFF, sizeof(struct slsi_chip_info_mib));
 
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
@@ -374,16 +373,27 @@ struct slsi_dev *slsi_dev_attach(struct device *dev, struct scsc_mx *core, struc
 		SLSI_ERR(sdev, "failed to register with p2p netdev\n");
 		goto err_wlan_registered;
 	}
-
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
 	if (slsi_netif_register(sdev, sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN]) != 0) {
 		SLSI_ERR(sdev, "failed to register with p2px_wlan1 netdev\n");
-		goto err_mhs_registered;
+		goto err_p2p_registered;
 	}
 	rcu_assign_pointer(sdev->netdev_ap, sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN]);
+#endif
+#endif
 #if CONFIG_SCSC_WLAN_MAX_INTERFACES >= 4
 	if (slsi_netif_register(sdev, sdev->netdev[SLSI_NET_INDEX_NAN]) != 0) {
 		SLSI_ERR(sdev, "failed to register with NAN netdev\n");
-		goto err_mhs_registered;
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
+		goto err_p2px_wlan_registered;
+#else
+		goto err_p2p_registered;
+#endif
+#else
+		goto err_p2p_registered;
+#endif
 	}
 #endif
 #endif
@@ -404,7 +414,15 @@ struct slsi_dev *slsi_dev_attach(struct device *dev, struct scsc_mx *core, struc
 #if CONFIG_SCSC_WLAN_MAX_INTERFACES >= 4
 		goto err_nan_registered;
 #else
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
+		goto err_p2px_wlan_registered;
+#else
 		goto err_p2p_registered;
+#endif
+#else
+		goto err_p2p_registered;
+#endif
 #endif
 	}
 	return sdev;
@@ -414,9 +432,13 @@ err_nan_registered:
 	slsi_netif_remove(sdev, sdev->netdev[SLSI_NET_INDEX_NAN]);
 #endif
 
-err_mhs_registered:
+#ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
+#if defined(CONFIG_SCSC_WLAN_MHS_STATIC_INTERFACE) || (defined(ANDROID_VERSION) && ANDROID_VERSION >= 90000)
+err_p2px_wlan_registered:
 	slsi_netif_remove(sdev, sdev->netdev[SLSI_NET_INDEX_P2PX_SWLAN]);
 	rcu_assign_pointer(sdev->netdev_ap, NULL);
+#endif
+#endif
 
 err_p2p_registered:
 	slsi_netif_remove(sdev, sdev->netdev[SLSI_NET_INDEX_P2P]);

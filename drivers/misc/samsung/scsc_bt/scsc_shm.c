@@ -43,6 +43,9 @@ static u8   h4_hci_event_ncp_header[4 + BSMHCP_TRANSFER_RING_ACL_COUNT * sizeof(
 static u32  h4_hci_event_ncp_header_len = 8;
 static struct hci_credit_entry *h4_hci_credit_entries = (struct hci_credit_entry *) &h4_hci_event_ncp_header[4];
 static u8   h4_hci_event_hardware_error[4] = { HCI_EVENT_PKT, HCI_EVENT_HARDWARE_ERROR_EVENT, 1, 0 };
+static u8   h4_iq_report_evt[HCI_IQ_REPORT_MAX_LEN];
+static u32  h4_iq_report_evt_len;
+
 
 static void scsc_bt_shm_irq_handler(int irqbit, void *data)
 {
@@ -61,6 +64,8 @@ static void scsc_bt_shm_irq_handler(int irqbit, void *data)
 	    bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read ||
 	    bt_service.bsmhcp_protocol->header.mailbox_acl_free_write !=
 	    bt_service.bsmhcp_protocol->header.mailbox_acl_free_read ||
+	    bt_service.bsmhcp_protocol->header.mailbox_iq_report_write !=
+	    bt_service.bsmhcp_protocol->header.mailbox_iq_report_read ||
 	    0 != atomic_read(&bt_service.error_count) ||
 	    bt_service.bsmhcp_protocol->header.panic_deathbed_confession) {
 		bt_service.interrupt_read_count++;
@@ -508,6 +513,42 @@ static const char *scsc_hci_evt_decode_event_code(u8 hci_event_code, u8 hci_ulp_
 }
 #endif
 
+static ssize_t scsc_iq_report_evt_read(char __user *buf, size_t len)
+{
+	ssize_t consumed = 0;
+	ssize_t ret = 0;
+
+	/* Calculate the amount of data that can be transferred */
+	len = min(h4_iq_report_evt_len - bt_service.read_offset, len);
+
+	SCSC_TAG_DEBUG(BT_H4, "SCSC_IQ_REPORT_EVT_READ: td(h4_iq_len=%u offset=%u)\n",
+								h4_iq_report_evt_len,
+								bt_service.read_offset);
+
+	/* Copy the data to the user buffer */
+	ret = copy_to_user(buf, &h4_iq_report_evt[bt_service.read_offset], len);
+	if (ret == 0) {
+		/* All good - Update our consumed information */
+		bt_service.read_offset += len;
+		consumed = len;
+
+		SCSC_TAG_DEBUG(BT_H4, "SCSC_IQ_REPORT_EVT_READ: (offset=%u consumed: %u)\n",
+									bt_service.read_offset,
+									consumed);
+
+		/* Have all data been copied to the userspace buffer */
+		if (bt_service.read_offset == h4_iq_report_evt_len) {
+			/* All good - read operation is completed */
+			bt_service.read_offset = 0;
+			bt_service.read_operation = BT_READ_OP_NONE;
+		}
+	} else {
+		SCSC_TAG_ERR(BT_H4, "copy_to_user returned: %zu\n", ret);
+		ret = -EACCES;
+	}
+
+	return ret == 0 ? consumed : ret;
+}
 
 static ssize_t scsc_hci_evt_read(char __user *buf, size_t len)
 {
@@ -734,6 +775,14 @@ static ssize_t scsc_bt_shm_h4_read_continue(char __user *buf, size_t len)
 
 		/* Copy data into the userspace buffer */
 		ret = scsc_acl_credit(buf, len);
+	} else if (bt_service.read_operation == BT_READ_OP_IQ_REPORT) {
+		SCSC_TAG_DEBUG(BT_H4, "BT_READ_OP_IQ_REPORT\n");
+
+		/* Copy data into the userspace buffer */
+		ret = scsc_iq_report_evt_read(buf, len);
+		if (bt_service.read_operation == BT_READ_OP_NONE)
+			/* All done - increase the read pointer and continue */
+			BSMHCP_INCREASE_INDEX(bt_service.mailbox_iq_report_read, BSMHCP_TRANSFER_RING_IQ_REPORT_SIZE);
 	} else if (BT_READ_OP_HCI_EVT_ERROR == bt_service.read_operation) {
 		SCSC_TAG_ERR(BT_H4, "BT_READ_OP_HCI_EVT_ERROR\n");
 
@@ -748,6 +797,79 @@ static ssize_t scsc_bt_shm_h4_read_continue(char __user *buf, size_t len)
 	return ret;
 }
 
+static ssize_t scsc_bt_shm_h4_read_iq_report_evt(char __user *buf, size_t len)
+{
+	ssize_t ret = 0;
+	ssize_t consumed = 0;
+
+	if (bt_service.read_operation == BT_READ_OP_NONE &&
+	    bt_service.mailbox_iq_report_read != bt_service.mailbox_iq_report_write) {
+		struct BSMHCP_TD_IQ_REPORTING_EVT *td =
+			&bt_service.bsmhcp_protocol->iq_reporting_transfer_ring[bt_service.mailbox_iq_report_read];
+		u32 index = 0;
+		u32 j = 0;
+		u32 i;
+
+		memset(h4_iq_report_evt, 0, sizeof(h4_iq_report_evt));
+		h4_iq_report_evt_len = 0;
+
+		h4_iq_report_evt[index++] = HCI_EVENT_PKT;
+		h4_iq_report_evt[index++] = 0x3E;
+		index++; /* Leaving room for total length of params  */
+		h4_iq_report_evt[index++] = td->subevent_code;
+
+		if (td->subevent_code == HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT_SUB_CODE) {
+			/* LE Connectionless IQ Report Event*/
+			h4_iq_report_evt[index++] = td->sync_handle & 0xFF;
+			h4_iq_report_evt[index++] = (td->sync_handle >> 8) & 0xFF;
+		} else if (td->subevent_code == HCI_LE_CONNECTION_IQ_REPORT_EVENT_SUB_CODE) {
+			/* LE connection IQ Report Event */
+			h4_iq_report_evt[index++] = td->connection_handle & 0xFF;
+			h4_iq_report_evt[index++] = (td->connection_handle >> 8) & 0xFF;
+			h4_iq_report_evt[index++] = td->rx_phy;
+
+		}
+		h4_iq_report_evt[index++] = td->channel_index;
+		h4_iq_report_evt[index++] = td->rssi & 0xFF;
+		h4_iq_report_evt[index++] = (td->rssi >> 8) & 0xFF;
+		h4_iq_report_evt[index++] = td->rssi_antenna_id;
+		h4_iq_report_evt[index++] = td->cte_type;
+		h4_iq_report_evt[index++] = td->slot_durations;
+		h4_iq_report_evt[index++] = td->packet_status;
+		h4_iq_report_evt[index++] = td->sample_count;
+
+		/* Total length of hci event */
+		h4_iq_report_evt_len = index + (2 * td->sample_count);
+
+		/* Total length of hci event parameters */
+		h4_iq_report_evt[2] = h4_iq_report_evt_len - 3;
+
+		for (i = 0; i < td->sample_count; i++) {
+			h4_iq_report_evt[index + i] = td->data[j++];
+			h4_iq_report_evt[(index + td->sample_count) + i] = td->data[j++];
+		}
+
+		bt_service.read_operation = BT_READ_OP_IQ_REPORT;
+		bt_service.read_index = bt_service.mailbox_iq_report_read;
+
+		ret = scsc_iq_report_evt_read(&buf[consumed], len - consumed);
+		if (ret > 0) {
+			/* All good - Update our consumed information */
+			consumed += ret;
+			ret = 0;
+
+			/**
+			 * Update the index if all the data could be copied to the userspace
+			 * buffer otherwise stop processing the HCI events
+			 */
+			if (bt_service.read_operation == BT_READ_OP_NONE)
+				BSMHCP_INCREASE_INDEX(bt_service.mailbox_iq_report_read,
+									  BSMHCP_TRANSFER_RING_IQ_REPORT_SIZE);
+		}
+	}
+
+	return ret == 0 ? consumed : ret;
+}
 
 static ssize_t scsc_bt_shm_h4_read_hci_evt(char __user *buf, size_t len)
 {
@@ -1062,6 +1184,7 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 	bt_service.mailbox_hci_evt_write  = bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write;
 	bt_service.mailbox_acl_rx_write   = bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write;
 	bt_service.mailbox_acl_free_write = bt_service.bsmhcp_protocol->header.mailbox_acl_free_write;
+	bt_service.mailbox_iq_report_write = bt_service.bsmhcp_protocol->header.mailbox_iq_report_write;
 
 	/* Only generate the HCI hardware error event if any pending operation has been completed
 	 * and the event hasn't already neen sent. This check assume the main while loop will exit
@@ -1096,6 +1219,7 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 		if ((bt_service.mailbox_hci_evt_read == bt_service.mailbox_hci_evt_write || bt_service.hci_event_paused) &&
 		    (bt_service.mailbox_acl_rx_read == bt_service.mailbox_acl_rx_write || bt_service.acldata_paused) &&
 		    bt_service.mailbox_acl_free_read == bt_service.mailbox_acl_free_write &&
+		    bt_service.mailbox_iq_report_read == bt_service.mailbox_iq_report_write &&
 		    0 == atomic_read(&bt_service.error_count) &&
 		    0 == bt_service.bsmhcp_protocol->header.panic_deathbed_confession) {
 			/* Don't wait if in NONBLOCK mode */
@@ -1106,11 +1230,20 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 
 			/* All read/write pairs are identical - wait for the firmware. The conditional
 			 * check is used to verify that a read/write pair has actually changed */
-			ret = wait_event_interruptible(bt_service.read_wait, ((bt_service.mailbox_hci_evt_read != bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write && !bt_service.hci_event_paused) ||
-									      (bt_service.mailbox_acl_rx_read != bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write && !bt_service.acldata_paused) ||
-									      (bt_service.mailbox_acl_free_read != bt_service.bsmhcp_protocol->header.mailbox_acl_free_write) ||
-									      0 != atomic_read(&bt_service.error_count) ||
-									      bt_service.bsmhcp_protocol->header.panic_deathbed_confession));
+			ret = wait_event_interruptible(
+				bt_service.read_wait,
+				((bt_service.mailbox_hci_evt_read !=
+				  bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write &&
+				  !bt_service.hci_event_paused) ||
+				 (bt_service.mailbox_acl_rx_read !=
+				  bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write &&
+				  !bt_service.acldata_paused) ||
+				 (bt_service.mailbox_acl_free_read !=
+				  bt_service.bsmhcp_protocol->header.mailbox_acl_free_write) ||
+				 (bt_service.mailbox_iq_report_read !=
+				  bt_service.bsmhcp_protocol->header.mailbox_iq_report_write) ||
+				 atomic_read(&bt_service.error_count) != 0 ||
+				 bt_service.bsmhcp_protocol->header.panic_deathbed_confession));
 
 			/* Has an error been detected elsewhere in the driver then just return from this function */
 			if (0 != atomic_read(&bt_service.error_count))
@@ -1124,12 +1257,20 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 			bt_service.mailbox_hci_evt_write = bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write;
 			bt_service.mailbox_acl_rx_write = bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write;
 			bt_service.mailbox_acl_free_write = bt_service.bsmhcp_protocol->header.mailbox_acl_free_write;
+			bt_service.mailbox_iq_report_write = bt_service.bsmhcp_protocol->header.mailbox_iq_report_write;
 		}
 
-		SCSC_TAG_DEBUG(BT_H4, "hci_evt_read=%u, hci_evt_write=%u, acl_rx_read=%u, acl_rx_write=%u, acl_free_read=%u, acl_free_write=%u\n",
-			       bt_service.mailbox_hci_evt_read, bt_service.mailbox_hci_evt_write,
-			       bt_service.mailbox_acl_rx_read, bt_service.mailbox_acl_rx_write,
-			       bt_service.mailbox_acl_free_read, bt_service.mailbox_acl_free_write);
+		SCSC_TAG_DEBUG(BT_H4, "hci_evt_read=%u, hci_evt_write=%u, acl_rx_read=%u,acl_rx_write=%u\n",
+									bt_service.mailbox_hci_evt_read,
+									bt_service.mailbox_hci_evt_write,
+									bt_service.mailbox_acl_rx_read,
+									bt_service.mailbox_acl_rx_write);
+
+		SCSC_TAG_DEBUG(BT_H4, "acl_free_read=%u, acl_free_write=%u, iq_report_read=%u iq_report_write=%u\n",
+									bt_service.mailbox_acl_free_read,
+									bt_service.mailbox_acl_free_write,
+									bt_service.mailbox_iq_report_read,
+									bt_service.mailbox_iq_report_write);
 
 		SCSC_TAG_DEBUG(BT_H4, "read_operation=%u, hci_event_paused=%u, acldata_paused=%u\n",
 			       bt_service.read_operation, bt_service.hci_event_paused,
@@ -1154,24 +1295,34 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 
 		/* First: process any pending HCI event that needs to be sent to userspace */
 		res = scsc_bt_shm_h4_read_hci_evt(&buf[consumed], len - consumed);
-		if (0 < res)
-			consumed += res;
-		else
+		if (res < 0) {
 			ret = res;
+			break;
+		}
+		consumed += res;
 
 		/* Second: process any pending ACL data that needs to be sent to userspace */
 		res = scsc_bt_shm_h4_read_acl_data(&buf[consumed], len - consumed);
-		if (0 < res)
-			consumed += res;
-		else
+		if (res < 0) {
 			ret = res;
+			break;
+		}
+		consumed += res;
 
 		/* Third: process any pending ACL data that needs to be sent to userspace */
 		res = scsc_bt_shm_h4_read_acl_credit(&buf[consumed], len - consumed);
-		if (0 < res)
-			consumed += res;
-		else
+		if (res < 0) {
 			ret = res;
+			break;
+		}
+		consumed += res;
+
+		res = scsc_bt_shm_h4_read_iq_report_evt(&buf[consumed], len - consumed);
+		if (res < 0) {
+			ret = res;
+			break;
+		}
+		consumed += res;
 	}
 
 	if (0 == ret && 0 == consumed) {
@@ -1205,10 +1356,16 @@ ssize_t scsc_bt_shm_h4_read(struct file *file, char __user *buf, size_t len, lof
 	    bt_service.mailbox_acl_free_read)
 		gen_fg_int = true;
 
+	if (bt_service.bsmhcp_protocol->header.mailbox_iq_report_read !=
+	    bt_service.mailbox_iq_report_read)
+		gen_fg_int = true;
+
+
 	/* Update the read index for all transfer rings */
 	bt_service.bsmhcp_protocol->header.mailbox_hci_evt_read = bt_service.mailbox_hci_evt_read;
 	bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read = bt_service.mailbox_acl_rx_read;
 	bt_service.bsmhcp_protocol->header.mailbox_acl_free_read = bt_service.mailbox_acl_free_read;
+	bt_service.bsmhcp_protocol->header.mailbox_iq_report_read = bt_service.mailbox_iq_report_read;
 
 	/* Ensure the data is updating correctly in memory */
 	mmiowb();
@@ -1393,6 +1550,7 @@ int scsc_bt_shm_init(void)
 	bt_service.mailbox_acl_rx_read = 0;
 	bt_service.mailbox_acl_free_read = 0;
 	bt_service.mailbox_acl_free_read_scan = 0;
+	bt_service.mailbox_iq_report_read = 0;
 	bt_service.read_index = 0;
 	bt_service.allocated_count = 0;
 

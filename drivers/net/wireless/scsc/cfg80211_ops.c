@@ -1,6 +1,6 @@
 /***************************************************************************
  *
- * Copyright (c) 2014 - 2017 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2014 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  ****************************************************************************/
 
@@ -17,6 +17,7 @@
 #include "mib.h"
 
 #include "scsc_wifilogger_rings.h"
+#include "nl80211_vendor.h"
 
 #define SLSI_MAX_CHAN_2G_BAND          14
 
@@ -27,13 +28,18 @@ MODULE_PARM_DESC(keep_alive_period, "default is 10 seconds");
 static bool slsi_is_mhs_active(struct slsi_dev *sdev)
 {
 	struct net_device *mhs_dev = sdev->netdev_ap;
-	struct netdev_vif *ndev_vif = netdev_priv(mhs_dev);
+	struct netdev_vif *ndev_vif;
 	bool ret;
 
-	SLSI_MUTEX_LOCK(ndev_vif->vif_mutex);
-	ret = ndev_vif->is_available;
-	SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
-	return ret;
+	if (mhs_dev) {
+		ndev_vif = netdev_priv(mhs_dev);
+		SLSI_MUTEX_LOCK(ndev_vif->vif_mutex);
+		ret = ndev_vif->is_available;
+		SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
+		return ret;
+	}
+
+	return 0;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 9))
@@ -413,7 +419,6 @@ int slsi_scan(struct wiphy *wiphy, struct net_device *dev,
 	struct slsi_dev           *sdev = SDEV_FROM_WIPHY(wiphy);
 	u16                       scan_type = FAPI_SCANTYPE_FULL_SCAN;
 	int                       r = 0;
-	u16                       p2p_state = sdev->p2p_state;
 	u8                        *scan_ie;
 	size_t                    scan_ie_len;
 	bool                      strip_wsc = false;
@@ -447,7 +452,20 @@ int slsi_scan(struct wiphy *wiphy, struct net_device *dev,
 		r = -EBUSY;
 		goto exit;
 	}
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+	if (ndev_vif->is_wips_running && (ndev_vif->vif_type == FAPI_VIFTYPE_STATION) &&
+	    (ndev_vif->sta.vif_status == SLSI_VIF_STATUS_CONNECTED)) {
+		int ret = 0;
 
+		SLSI_NET_DBG3(dev, SLSI_CFG80211, "Scan invokes DRIVER_BCN_ABORT\n");
+		ret = slsi_mlme_set_forward_beacon(sdev, dev, FAPI_ACTION_STOP);
+
+		if (!ret) {
+			ret = slsi_send_forward_beacon_abort_vendor_event(sdev,
+									  SLSI_FORWARD_BEACON_ABORT_REASON_SCANNING);
+		}
+	}
+#endif
 	SLSI_NET_DBG3(dev, SLSI_CFG80211, "channels:%d, ssids:%d, ie_len:%d, vif_index:%d\n", request->n_channels,
 		      request->n_ssids, (int)request->ie_len, ndev_vif->ifnum);
 
@@ -470,7 +488,6 @@ int slsi_scan(struct wiphy *wiphy, struct net_device *dev,
 		 * check for n_channels as 1
 		 */
 		if (request->n_channels == SLSI_P2P_SOCIAL_CHAN_COUNT || request->n_channels == 1) {
-			p2p_state = P2P_SCANNING;
 			scan_type = FAPI_SCANTYPE_P2P_SCAN_SOCIAL;
 		} else if (request->n_channels > SLSI_P2P_SOCIAL_CHAN_COUNT) {
 			scan_type = FAPI_SCANTYPE_P2P_SCAN_FULL;
@@ -521,27 +538,26 @@ int slsi_scan(struct wiphy *wiphy, struct net_device *dev,
 
 #ifdef CONFIG_SCSC_WLAN_ENABLE_MAC_RANDOMISATION
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
-	if (request->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
-		memcpy(sdev->scan_mac_addr, request->mac_addr, ETH_ALEN);
-		r = slsi_set_mac_randomisation_mask(sdev, request->mac_addr_mask);
-		if (!r)
-			sdev->scan_addr_set = 1;
-	} else
+		if (request->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
+			if (sdev->fw_mac_randomization_enabled) {
+				memcpy(sdev->scan_mac_addr, request->mac_addr, ETH_ALEN);
+				r = slsi_set_mac_randomisation_mask(sdev, request->mac_addr_mask);
+				if (!r)
+					sdev->scan_addr_set = 1;
+			} else {
+				SLSI_NET_INFO(dev, "Mac Randomization is not enabled in Firmware\n");
+				sdev->scan_addr_set = 0;
+			}
+		} else
 #endif
-	if (scan_type == FAPI_SCANTYPE_GSCAN && sdev->scan_addr_set == 1) {
-		memset(mac_addr_mask, 0xFF, ETH_ALEN);
-		for (i = 3; i < ETH_ALEN; i++)
-			mac_addr_mask[i] = 0x00;
-		slsi_set_mac_randomisation_mask(sdev, mac_addr_mask);
-	} else {
 		if (sdev->scan_addr_set) {
 			memset(mac_addr_mask, 0xFF, ETH_ALEN);
 			r = slsi_set_mac_randomisation_mask(sdev, mac_addr_mask);
-			if (!r)
-				sdev->scan_addr_set = 0;
+			sdev->scan_addr_set = 0;
 		}
-	}
 #endif
+
+
 	r = slsi_mlme_add_scan(sdev,
 			       dev,
 			       scan_type,
@@ -583,7 +599,8 @@ int slsi_scan(struct wiphy *wiphy, struct net_device *dev,
 
 		/* Update State only for scan in Device role */
 		if (SLSI_IS_VIF_INDEX_P2P(ndev_vif) && (!SLSI_IS_P2P_GROUP_STATE(sdev))) {
-			SLSI_P2P_STATE_CHANGE(sdev, p2p_state);
+			if (scan_type == FAPI_SCANTYPE_P2P_SCAN_SOCIAL)
+				SLSI_P2P_STATE_CHANGE(sdev, P2P_SCANNING);
 		} else if (!SLSI_IS_VIF_INDEX_P2P(ndev_vif) && scan_ie_len) {
 			kfree(ndev_vif->probe_req_ies);
 			ndev_vif->probe_req_ies = kmalloc(request->ie_len, GFP_KERNEL);
@@ -684,7 +701,11 @@ int slsi_sched_scan_start(struct wiphy                       *wiphy,
 	if (r != 0) {
 		if (r > 0) {
 			SLSI_NET_DBG2(dev, SLSI_CFG80211, "Nothing to be done\n");
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
+			cfg80211_sched_scan_stopped(wiphy, request->reqid);
+#else
 			cfg80211_sched_scan_stopped(wiphy);
+#endif
 			r = 0;
 		} else {
 			SLSI_NET_DBG2(dev, SLSI_CFG80211, "add_scan error: %d\n", r);
@@ -810,14 +831,16 @@ int slsi_connect(struct wiphy *wiphy, struct net_device *dev,
 	if (WARN_ON(sme->ssid_len > IEEE80211_MAX_SSID_LEN))
 		goto exit_with_error;
 
-	if ((SLSI_IS_VIF_INDEX_WLAN(ndev_vif)) && (sdev->p2p_state == P2P_GROUP_FORMED_CLI)) {
-		p2p_dev = slsi_get_netdev(sdev, SLSI_NET_INDEX_P2PX_SWLAN);
-		if (p2p_dev) {
-			ndev_p2p_vif  = netdev_priv(p2p_dev);
-			if (ndev_p2p_vif->sta.sta_bss) {
-				if (SLSI_ETHER_EQUAL(ndev_p2p_vif->sta.sta_bss->bssid, sme->bssid)) {
-					SLSI_NET_ERR(dev, "Connect Request Rejected\n");
-					goto exit_with_error;
+	if (sme->bssid) {
+		if ((SLSI_IS_VIF_INDEX_WLAN(ndev_vif)) && (sdev->p2p_state == P2P_GROUP_FORMED_CLI)) {
+			p2p_dev = slsi_get_netdev(sdev, SLSI_NET_INDEX_P2PX_SWLAN);
+			if (p2p_dev) {
+				ndev_p2p_vif  = netdev_priv(p2p_dev);
+				if (ndev_p2p_vif->sta.sta_bss) {
+					if (SLSI_ETHER_EQUAL(ndev_p2p_vif->sta.sta_bss->bssid, sme->bssid)) {
+						SLSI_NET_ERR(dev, "Connect Request Rejected\n");
+						goto exit_with_error;
+					}
 				}
 			}
 		}
@@ -851,6 +874,10 @@ int slsi_connect(struct wiphy *wiphy, struct net_device *dev,
 			}
 
 			if (!memcmp(&connected_ssid[2], sme->ssid, connected_ssid[1])) { /*same ssid*/
+				if (!sme->channel) {
+					SLSI_NET_ERR(dev, "Roaming has been rejected, as sme->channel is null\n");
+					goto exit_with_error;
+				}
 				r = slsi_mlme_roam(sdev, dev, sme->bssid, sme->channel->center_freq);
 				if (r) {
 					SLSI_NET_ERR(dev, "Failed to roam : %d\n", r);
@@ -1061,7 +1088,13 @@ int slsi_disconnect(struct wiphy *wiphy, struct net_device *dev,
 	 * Unless the MLME-DISCONNECT-CFM fails.
 	 */
 	if (!ndev_vif->activated) {
-		r = -EINVAL;
+		r = 0;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0))
+		cfg80211_disconnected(dev, reason_code, NULL, 0, false, GFP_KERNEL);
+#else
+		cfg80211_disconnected(dev, reason_code, NULL, 0, GFP_KERNEL);
+#endif
+		SLSI_NET_INFO(dev, "Vif is already Deactivated\n");
 		goto exit;
 	}
 
@@ -1074,6 +1107,7 @@ int slsi_disconnect(struct wiphy *wiphy, struct net_device *dev,
 	switch (ndev_vif->vif_type) {
 	case FAPI_VIFTYPE_STATION:
 	{
+		slsi_reset_throughput_stats(dev);
 		/* Disconnecting spans several host firmware interactions so track the status
 		 * so that the Host can ignore connect related signaling eg. MLME-CONNECT-IND
 		 * now that it has triggered a disconnect.
@@ -1312,22 +1346,6 @@ int slsi_get_station(struct wiphy *wiphy, struct net_device *dev,
 		goto exit;
 	}
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 9))
-	SLSI_NET_DBG1(dev, SLSI_CFG80211, "%pM, tx:%d, txbytes:%llu, rx:%d, rxbytes:%llu\n",
-		      mac,
-		      peer->sinfo.tx_packets,
-		      peer->sinfo.tx_bytes,
-		      peer->sinfo.rx_packets,
-		      peer->sinfo.rx_bytes);
-#else
-	SLSI_NET_DBG1(dev, SLSI_CFG80211, "%pM, tx:%d, txbytes:%d, rx:%d, rxbytes:%d\n",
-		      mac,
-		      peer->sinfo.tx_packets,
-		      peer->sinfo.tx_bytes,
-		      peer->sinfo.rx_packets,
-		      peer->sinfo.rx_bytes);
-#endif
-
 	if (((ndev_vif->iftype == NL80211_IFTYPE_STATION && !(ndev_vif->sta.roam_in_progress)) ||
 	     ndev_vif->iftype == NL80211_IFTYPE_P2P_CLIENT)) {
 		/*Read MIB and fill into the peer.sinfo*/
@@ -1340,6 +1358,26 @@ int slsi_get_station(struct wiphy *wiphy, struct net_device *dev,
 
 	*sinfo = peer->sinfo;
 	sinfo->generation = ndev_vif->cfg80211_sinfo_generation;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 9))
+			SLSI_NET_DBG1(dev, SLSI_CFG80211, "%pM, tx:%d, txbytes:%llu, rx:%d, rxbytes:%llu tx_fail:%d tx_retry:%d\n",
+				      mac,
+				      peer->sinfo.tx_packets,
+				      peer->sinfo.tx_bytes,
+				      peer->sinfo.rx_packets,
+				      peer->sinfo.rx_bytes,
+				      peer->sinfo.tx_failed,
+				      peer->sinfo.tx_retries);
+#else
+			SLSI_NET_DBG1(dev, SLSI_CFG80211, "%pM, tx:%d, txbytes:%d, rx:%d, rxbytes:%d  tx_fail:%d tx_retry:%d\n",
+				      mac,
+				      peer->sinfo.tx_packets,
+				      peer->sinfo.tx_bytes,
+				      peer->sinfo.rx_packets,
+				      peer->sinfo.rx_bytes,
+				      peer->sinfo.tx_failed,
+				      peer->sinfo.tx_retries);
+#endif
 
 exit:
 	SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
@@ -1868,7 +1906,9 @@ int slsi_start_ap(struct wiphy *wiphy, struct net_device *dev,
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
 	int wifi_sharing_channel_switched = 0;
 	struct netdev_vif *ndev_sta_vif;
+	int invalid_channel = 0;
 #endif
+	int skip_indoor_check_for_wifi_sharing = 0;
 	u8 *ds_params_ie = NULL;
 	struct ieee80211_mgmt  *mgmt;
 	u16                    beacon_ie_head_len;
@@ -1902,7 +1942,15 @@ int slsi_start_ap(struct wiphy *wiphy, struct net_device *dev,
 		if ((ndev_sta_vif->activated) && (ndev_sta_vif->vif_type == FAPI_VIFTYPE_STATION) &&
 		    (ndev_sta_vif->sta.vif_status == SLSI_VIF_STATUS_CONNECTING ||
 		     ndev_sta_vif->sta.vif_status == SLSI_VIF_STATUS_CONNECTED)) {
-			slsi_select_wifi_sharing_ap_channel(wiphy, dev, settings, sdev, &wifi_sharing_channel_switched);
+			invalid_channel = slsi_select_wifi_sharing_ap_channel(wiphy, dev, settings, sdev,
+									      &wifi_sharing_channel_switched);
+			skip_indoor_check_for_wifi_sharing = 1;
+			if (invalid_channel) {
+				SLSI_NET_ERR(dev, "Rejecting AP start req at host (invalid channel)\n");
+				SLSI_MUTEX_UNLOCK(ndev_sta_vif->vif_mutex);
+				r = -EINVAL;
+				goto exit_with_vif_mutex;
+			}
 		}
 		SLSI_MUTEX_UNLOCK(ndev_sta_vif->vif_mutex);
 	}
@@ -1924,7 +1972,8 @@ int slsi_start_ap(struct wiphy *wiphy, struct net_device *dev,
 			}
 		}
 	}
-	if (sdev->band_5g_supported && ((settings->chandef.chan->center_freq / 1000) == 5)) {
+	if (!skip_indoor_check_for_wifi_sharing && sdev->band_5g_supported &&
+	    ((settings->chandef.chan->center_freq / 1000) == 5)) {
 		channel =  ieee80211_get_channel(sdev->wiphy, settings->chandef.chan->center_freq);
 		if (!channel) {
 			SLSI_ERR(sdev, "Invalid frequency %d used to start AP. Channel not found\n",
@@ -2127,7 +2176,7 @@ int slsi_start_ap(struct wiphy *wiphy, struct net_device *dev,
 	}
 #endif
 
-	if (indoor_channel == 1
+	if ((indoor_channel == 1)
 #ifdef CONFIG_SCSC_WLAN_WIFI_SHARING
 	|| (wifi_sharing_channel_switched == 1)
 #endif
@@ -2254,7 +2303,7 @@ int slsi_start_ap(struct wiphy *wiphy, struct net_device *dev,
 
 	r = slsi_read_disconnect_ind_timeout(sdev, SLSI_PSID_UNIFI_DISCONNECT_TIMEOUT);
 	if (r != 0)
-		sdev->device_config.ap_disconnect_ind_timeout = *sdev->sig_wait_cfm_timeout + 2000;
+		sdev->device_config.ap_disconnect_ind_timeout = *sdev->sig_wait_cfm_timeout;
 
 	SLSI_NET_DBG2(dev, SLSI_CFG80211, "slsi_read_disconnect_ind_timeout: timeout = %d", sdev->device_config.ap_disconnect_ind_timeout);
 
@@ -2295,6 +2344,7 @@ int slsi_stop_ap(struct wiphy *wiphy, struct net_device *dev)
 	}
 	ndev_vif = netdev_priv(dev);
 
+	slsi_reset_throughput_stats(dev);
 
 	SLSI_MUTEX_LOCK(ndev_vif->vif_mutex);
 
@@ -2334,6 +2384,7 @@ exit:
 	SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
 
 	/* AP stop stuff is done in del_station callback*/
+
 	return 0;
 }
 
@@ -3268,6 +3319,13 @@ struct slsi_dev                           *slsi_cfg80211_new(struct device *dev)
 
 	/* Scheduled scanning support */
 	wiphy->flags |= WIPHY_FLAG_SUPPORTS_SCHED_SCAN;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0))
+	/* Parameters for Scheduled Scanning Support */
+	wiphy->max_sched_scan_reqs = 1;
+	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_SCHED_SCAN_RELATIVE_RSSI);
+#endif
+
 	/* Match the maximum number of SSIDs that could be requested from wpa_supplicant */
 	wiphy->max_sched_scan_ssids = 16;
 

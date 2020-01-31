@@ -38,10 +38,17 @@ enum sysreg_is_reg_field {
 #define IORESOURCE_VRA_CH0	5
 #define IORESOURCE_VRA_CH1	6
 
-//#define FIMC_IS_RESERVE_LIB_SIZE	(0)		/* Not Used */
-#define FIMC_IS_RESERVE_LIB_SIZE       (0x00600000)    /* 6MB */
-#define FIMC_IS_TAAISP_SIZE		(0x00500000)	/* 5MB */
-#define FIMC_IS_VRA_SIZE		(0x00800000)	/* 8MB */
+#if defined DDK_USE_SMALL_MEMORY        /* DDK reduce memory for 2GB product 2019 A10 */
+//#define FIMC_IS_RESERVE_LIB_SIZE      (0)             /* Not Used */
+#define FIMC_IS_RESERVE_LIB_SIZE        (0x00100000)    /* 1MB */
+#define FIMC_IS_TAAISP_SIZE             (0x00100000)    /* 1MB */
+#define FIMC_IS_VRA_SIZE                (0x00800000)    /* 8MB */
+#define FIMC_IS_HEAP_SIZE               (0x01400000)    /* 20MB */
+#else /* DDK_USE_SMALL_MEMORY */
+//#define FIMC_IS_RESERVE_LIB_SIZE      (0)             /* Not Used */
+#define FIMC_IS_RESERVE_LIB_SIZE        (0x00600000)    /* 6MB */
+#define FIMC_IS_TAAISP_SIZE             (0x00500000)    /* 5MB */
+#define FIMC_IS_VRA_SIZE                (0x00800000)    /* 8MB */
 
 #if defined(SAMSUNG_LIVE_OUTFOCUS) || defined(ENABLE_REMOSAIC_CAPTURE)
 #if defined(USE_AP_PDAF)
@@ -52,6 +59,7 @@ enum sysreg_is_reg_field {
 #else
 #define FIMC_IS_HEAP_SIZE		(0x01900000)	/* 25MB */
 #endif
+#endif /* DDK_USE_SMALL_MEMORY */
 
 #define SYSREG_IS_BASE_ADDR		0x14510000
 #define HWFC_INDEX_RESET_ADDR			0x14641050

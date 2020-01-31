@@ -212,7 +212,6 @@ struct sec_battery_info {
 	bool safety_timer_set;
 	bool lcd_status;
 	bool skip_swelling;
-	bool temp_control;
 
 	int status;
 	int health;
@@ -300,8 +299,10 @@ struct sec_battery_info {
 	int wpc_temp;
 	int coil_temp;
 	int slave_chg_temp;
-
+#if defined(CONFIG_ABNORMAL_BAT_THM_WA)
+	bool temp_control;
 	int prev_bat_temp;
+#endif
 
 	int temp_adc;
 	int temp_ambient_adc;

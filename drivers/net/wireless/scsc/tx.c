@@ -22,6 +22,26 @@
 
 #include <linux/spinlock.h>
 
+int slsi_get_dwell_time_for_wps(struct slsi_dev *sdev, struct netdev_vif *ndev_vif, u8 *eapol, u16 eap_length)
+{
+	/* Note that Message should not be M8.This check is to identify only WSC_START message or M1-M7 */
+	/*Return 100ms If opcode type WSC msg and Msg Type M1-M7 or if opcode is WSC start.*/
+	if (eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_REQUEST ||
+	    eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_RESPONSE) {
+		if (eapol[SLSI_EAP_TYPE_POS] == SLSI_EAP_TYPE_EXPANDED && eap_length >= SLSI_EAP_OPCODE_POS - 3 &&
+		    ((eapol[SLSI_EAP_OPCODE_POS] == SLSI_EAP_OPCODE_WSC_MSG && eap_length >= SLSI_EAP_MSGTYPE_POS - 3 &&
+		    eapol[SLSI_EAP_MSGTYPE_POS] != SLSI_EAP_MSGTYPE_M8) ||
+		    eapol[SLSI_EAP_OPCODE_POS] == SLSI_EAP_OPCODE_WSC_START))
+			return SLSI_EAP_WPS_DWELL_TIME;
+		/* This is to check if a frame is EAP request identity and on P2P vif.If yes then set dwell time to 100ms */
+		if (SLSI_IS_VIF_INDEX_P2P_GROUP(sdev, ndev_vif) &&
+		    eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_REQUEST &&
+		    eapol[SLSI_EAP_TYPE_POS] == SLSI_EAP_TYPE_IDENTITY)
+			return SLSI_EAP_WPS_DWELL_TIME;
+	}
+	return 0;
+}
+
 static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *skb)
 {
 	struct netdev_vif	*ndev_vif = netdev_priv(dev);
@@ -32,6 +52,7 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 	int			ret = 0;
 	u32              dwell_time = sdev->fw_dwell_time;
 	u64			tx_bytes_tmp = 0;
+	u16                 eap_length = 0;
 
 	slsi_spinlock_lock(&ndev_vif->peer_lock);
 	peer = slsi_get_peer_from_mac(sdev, dev, eth_hdr(skb)->h_dest);
@@ -50,7 +71,7 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 		 *   - Key type bit set in key info (pairwise=1, Group=0)
 		 *   - Key Data Length would be 0
 		 */
-		if ((skb->len + sizeof(struct ethhdr)) >= 99)
+		if ((skb->len - sizeof(struct ethhdr)) >= 99)
 			eapol = skb->data + sizeof(struct ethhdr);
 		if (eapol && eapol[SLSI_EAPOL_IEEE8021X_TYPE_POS] == SLSI_IEEE8021X_TYPE_EAPOL_KEY) {
 			msg_type = FAPI_MESSAGETYPE_EAPOL_KEY_M123;
@@ -60,22 +81,28 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 			    (eapol[SLSI_EAPOL_KEY_INFO_HIGHER_BYTE_POS] & SLSI_EAPOL_KEY_INFO_MIC_BIT_IN_HIGHER_BYTE) &&
 			    (eapol[SLSI_EAPOL_KEY_DATA_LENGTH_HIGHER_BYTE_POS] == 0) &&
 			    (eapol[SLSI_EAPOL_KEY_DATA_LENGTH_LOWER_BYTE_POS] == 0)) {
-				SLSI_INFO(sdev, "Send 4way-H/S, M4\n");
 				msg_type = FAPI_MESSAGETYPE_EAPOL_KEY_M4;
 				dwell_time = 0;
-			} else if (msg_type == FAPI_MESSAGETYPE_EAPOL_KEY_M123) {
-				if (!(eapol[SLSI_EAPOL_KEY_INFO_HIGHER_BYTE_POS] &
-				      SLSI_EAPOL_KEY_INFO_MIC_BIT_IN_HIGHER_BYTE))
-					SLSI_INFO(sdev, "Send 4way-H/S, M1\n");
-				else if (eapol[SLSI_EAPOL_KEY_INFO_HIGHER_BYTE_POS] &
-					 SLSI_EAPOL_KEY_INFO_SECURE_BIT_IN_HIGHER_BYTE)
-					SLSI_INFO(sdev, "Send 4way-H/S, M3\n");
-				else
-					SLSI_INFO(sdev, "Send 4way-H/S, M2\n");
 			}
 		} else {
 			msg_type = FAPI_MESSAGETYPE_EAP_MESSAGE;
+			if ((skb->len - sizeof(struct ethhdr)) >= 9)
+				eapol = skb->data + sizeof(struct ethhdr);
+
 			dwell_time = 0;
+			if (eapol && eapol[SLSI_EAPOL_IEEE8021X_TYPE_POS] == SLSI_IEEE8021X_TYPE_EAP_PACKET) {
+				eap_length = (skb->len - sizeof(struct ethhdr)) - 4;
+				if (eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_REQUEST)
+					SLSI_INFO(sdev, "Send EAP-Request (%d)\n", eap_length);
+				else if (eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_RESPONSE)
+					SLSI_INFO(sdev, "Send EAP-Response (%d)\n", eap_length);
+				else if (eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_SUCCESS)
+					SLSI_INFO(sdev, "Send EAP-Success (%d)\n", eap_length);
+				else if (eapol[SLSI_EAP_CODE_POS] == SLSI_EAP_PACKET_FAILURE)
+					SLSI_INFO(sdev, "Send EAP-Failure (%d)\n", eap_length);
+				/* Need to set dwell time for wps exchange and EAP identity frame for P2P */
+				dwell_time = slsi_get_dwell_time_for_wps(sdev, ndev_vif, eapol, eap_length);
+			}
 		}
 	break;
 	case ETH_P_WAI:
@@ -93,10 +120,9 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 	/* EAPOL/WAI frames are send via the MLME */
 	tx_bytes_tmp = skb->len; /*len copy to avoid null pointer of skb*/
 	ret = slsi_mlme_send_frame_data(sdev, dev, skb, msg_type, 0, dwell_time, 0);
-	if (!ret) {
-		peer->sinfo.tx_packets++;
-		peer->sinfo.tx_bytes += tx_bytes_tmp;
-	}
+	if (!ret)
+		peer->sinfo.tx_bytes += tx_bytes_tmp; //skb->len;
+
 	slsi_spinlock_unlock(&ndev_vif->peer_lock);
 	return ret;
 }
@@ -374,7 +400,6 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 	/* What about the original if we passed in a copy ? */
 	if (original_skb)
 		slsi_kfree_skb(original_skb);
-	peer->sinfo.tx_packets++;
 	peer->sinfo.tx_bytes += len;
 	slsi_offline_dbg_printf(sdev, 4, false, "%llu : %-8s : ucast_tx", ktime_to_ns(ktime_get()), "HIP TX");
 	return ret;
@@ -556,12 +581,12 @@ int slsi_tx_control(struct slsi_dev *sdev, struct net_device *dev, struct sk_buf
 
 		SLSI_NET_ERR(dev, "%s (signal %d)\n", res == -ENOSPC ? "Queue is full. Flow control" : "Failed to transmit", fapi_get_sigid(skb));
 
-		snprintf(reason, sizeof(reason), "Failed to transmit signal 0x%04X (err:%d)", fapi_get_sigid(skb), res);
-		slsi_sm_service_failed(sdev, reason);
+		if (!in_interrupt()) {
+			snprintf(reason, sizeof(reason), "Failed to transmit signal 0x%04X (err:%d)", fapi_get_sigid(skb), res);
+			slsi_sm_service_failed(sdev, reason);
 
-		res = -EIO;
-	} else {
-		slsi_offline_dbg_printf(sdev, 4, false, "%llu : %-8s : ctrl", ktime_to_ns(ktime_get()), "HIP TX");
+			res = -EIO;
+		}
 	}
 exit:
 	return res;

@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- * Copyright (c) 2012 - 2017 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2012 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  ****************************************************************************/
 
@@ -101,10 +101,12 @@ extern struct ieee80211_sta_vht_cap       slsi_vht_cap;
 #define SLSI_MAX_PATTERN_LENGTH 6
 
 /*Default values of MIBS params for GET_STA_INFO driver private command */
-#define SLSI_DEFAULT_UNIFI_PEER_BANDWIDTH             -1
-#define SLSI_DEFAULT_UNIFI_PEER_NSS                          0
-#define SLSI_DEFAULT_UNIFI_PEER_RSSI                         1
-#define SLSI_DEFAULT_UNIFI_PEER_TX_DATA_RATE          0
+#define SLSI_DEFAULT_UNIFI_PEER_RX_RETRY_PACKETS 0
+#define SLSI_DEFAULT_UNIFI_PEER_RX_BC_MC_PACKETS 0
+#define SLSI_DEFAULT_UNIFI_PEER_BANDWIDTH       -1
+#define SLSI_DEFAULT_UNIFI_PEER_NSS              0
+#define SLSI_DEFAULT_UNIFI_PEER_RSSI             1
+#define SLSI_DEFAULT_UNIFI_PEER_TX_DATA_RATE     0
 
 #define SLSI_CHECK_TYPE(sdev, recv_type, exp_type) \
 	do { \
@@ -148,6 +150,9 @@ int slsi_mlme_get(struct slsi_dev *sdev, struct net_device *dev, u8 *req, int re
 
 int slsi_mlme_add_vif(struct slsi_dev *sdev, struct net_device *dev, u8 *interface_address, u8 *device_address);
 void slsi_mlme_del_vif(struct slsi_dev *sdev, struct net_device *dev);
+#ifdef CONFIG_SLSI_WLAN_STA_FWD_BEACON
+int slsi_mlme_set_forward_beacon(struct slsi_dev *sdev, struct net_device *dev, int action);
+#endif
 int slsi_mlme_set_channel(struct slsi_dev *sdev, struct net_device *dev, struct ieee80211_channel *chan, u16 duration, u16 interval, u16 count);
 void slsi_ap_obss_scan_done_ind(struct net_device *dev, struct netdev_vif *ndev_vif);
 
@@ -230,7 +235,6 @@ int slsi_mlme_set_traffic_parameters(struct slsi_dev *sdev, struct net_device *d
 int slsi_mlme_del_traffic_parameters(struct slsi_dev *sdev, struct net_device *dev, u16 user_priority);
 
 #ifdef CONFIG_SCSC_WLAN_GSCAN_ENABLE
-int slsi_mlme_significant_change_set(struct slsi_dev *sdev, struct net_device *dev, struct slsi_nl_significant_change_params *significant_param_ptr);
 int slsi_mlme_set_pno_list(struct slsi_dev *sdev, int count,
 			   struct slsi_epno_param *epno_param, struct slsi_epno_hs2_param *epno_hs2_param);
 int slsi_mlme_start_link_stats_req(struct slsi_dev *sdev, u16 mpdu_size_threshold, bool aggressive_statis_enabled);
@@ -257,4 +261,7 @@ int slsi_mlme_set_ctwindow(struct slsi_dev *sdev, struct net_device *dev, unsign
 int slsi_mlme_set_p2p_noa(struct slsi_dev *sdev, struct net_device *dev, unsigned int noa_count,
 			  unsigned int interval, unsigned int duration);
 void slsi_fw_tx_rate_calc(u16 fw_rate, struct rate_info *tx_rate, unsigned long *data_rate_mbps);
+int slsi_test_sap_configure_monitor_mode(struct slsi_dev *sdev, struct net_device *dev, struct cfg80211_chan_def *chandef);
+
+struct sk_buff *slsi_mlme_req_cfm(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *skb, u16 cfm_id);
 #endif /*__SLSI_MLME_H__*/
