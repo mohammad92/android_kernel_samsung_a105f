@@ -8,7 +8,7 @@ PARENT_DIR=`readlink -f ${DIR}/..`;
 export ANDROID_MAJOR_VERSION=q
 ARCH=arm64
 BUILD_CROSS_COMPILE=$PARENT_DIR/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-KERNEL_MAKE_ENV=""
+KERNEL_MAKE_ENV="LOCALVERSION=-afaneh92"
 
 # Color
 ON_BLUE=`echo -e "\033[44m"`	# On Blue
